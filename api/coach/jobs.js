@@ -26,6 +26,8 @@ import { buildPrompt } from './core/prompt.js';
 import { handleFor } from './handle.js';
 import { fetchFor } from './node-fetch.js';
 import { canDropPrivileges, unprivilegedIds } from './adapters/spawn.js';
+import { authorizedAdapter } from './authorize.js';
+import { recoverLoginOnBoot } from './codex-auth.js';
 import { cohortForPayload, invalidate as invalidateCohort } from './cohort.js';
 
 // The prompt assembly, the plan fingerprint and the invoke→parse→validate→repair loop all
@@ -238,6 +240,7 @@ export function enqueue(uid, opts) {
   const job = {
     id: crypto.randomBytes(8).toString('hex'),
     uid,
+    credentialRevision: cfgStore.credentialRevision(uid),
     forgetSeq: forgetSeq.get(uid) || 0,
     kind: opts.kind,                                  // 'create' | 'review' | 'debrief'
     trigger: opts.trigger || 'manual',                // 'manual' | 'scheduled'
@@ -316,6 +319,9 @@ async function execute(job) {
   const cfg = cfgStore.load();
   const adapter = adapterFor(cfg.provider);
   if (!adapter) return finish(job, { outcome: 'failed', errorClass: 'off' });
+  if (cfgStore.credentialRevision(job.uid) !== job.credentialRevision || !cfgStore.credentialFor(job.uid).ok) {
+    return finish(job, { outcome: 'failed', errorClass: 'auth' });
+  }
 
   if (job.kind === 'debrief' && !payloadLib.findWorkout(S, job.workoutId)) {
     return finish(job, { outcome: 'failed', errorClass: 'noworkout' });
@@ -355,7 +361,7 @@ async function execute(job) {
     if (ids) shareJobDir(jobDir, ids);
 
     const attempt = await runPipeline({
-      adapter, cfg, kind: job.kind, payload, model: cfgStore.modelFor(cfg), timeoutMs: TIMEOUT_MS,
+      adapter: authorizedAdapter(adapter, job.uid, job.credentialRevision), cfg, kind: job.kind, payload, model: cfgStore.modelFor(cfg), timeoutMs: TIMEOUT_MS,
       // The HTTP adapters take the fetch and the abort signal they are given; the runtime
       // adapters ignore both.
       invokeOpts: { jobDir, env, fetch: fetchFor(TIMEOUT_MS), signal: ctl.signal }
@@ -446,22 +452,23 @@ function removeJobDir(jobDir, ids) {
   try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch { /* leaked, not fatal */ }
 }
 
-export async function testRun() {
+export async function testRun(uid) {
   const cfg = cfgStore.load();
   const adapter = adapterFor(cfg.provider);
   if (!adapter) return { ok: false, error: 'no provider configured' };
+  const credential = cfgStore.credentialFor(uid);
+  if (!credential.ok) return { ok: false, error: 'This profile cannot use the configured provider account.' };
+  if (adapter.spawns !== false && !canDropPrivileges().ok) return { ok: false, error: 'The Coach privilege boundary is unavailable.' };
+  const revision = cfgStore.credentialRevision(uid);
   const jobDir = adapter.spawns === false ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'coach-test-'));
   try {
-    // No user asked for this, so there is no profile whose account is being spent. In instance
-    // mode that is the bound profile's credential — the one the round-trip is meant to prove —
-    // and in per-profile mode it is nobody's, which is the honest answer: an admin cannot test
-    // a credential that belongs to a profile.
-    const env = cfgStore.jobEnv(jobDir || os.tmpdir(), cfgStore.credentialFor(cfgStore.boundUidFor(cfg)));
+    // The requester is the payer, even for an admin test. Never substitute the bound owner.
+    const env = cfgStore.jobEnv(jobDir || os.tmpdir(), credential);
     const ids = jobDir && unprivilegedIds();
     if (ids) shareJobDir(jobDir, ids);
     const check = await adapter.check(cfg, env);
     if (!check.ok) return { ok: false, error: check.error || 'the provider runtime could not be run' };
-    const r = await adapter.invoke({
+    const r = await authorizedAdapter(adapter, uid, revision).invoke({
       cfg, jobDir, env, model: cfgStore.modelFor(cfg), timeoutMs: 90000, fetch: fetchFor(90000),
       prompt: 'Reply with exactly this JSON object and nothing else: {"coach_contract":1,"ok":true}'
     });
@@ -486,6 +493,7 @@ export async function testRun() {
  * that may already have cost them a provider call.
  */
 export function recoverOnBoot() {
+  recoverLoginOnBoot();
   let n = 0;
   try {
     for (const f of fs.readdirSync(COACH_DIR)) {

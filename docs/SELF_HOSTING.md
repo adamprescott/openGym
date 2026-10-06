@@ -507,6 +507,9 @@ placeholder until one of its owner's devices — each keeps its own copy — upl
 you move openGym to another server, copy the whole `data/`, `uploads/` included; each person can
 also carry their own through Settings → *Export with photos & videos* and import it there.
 
+For Codex subscription setup, owner-only access and verification, see
+[Codex Coach](CODEX_COACH.md).
+
 If you enabled the AI Coach with the Codex provider, note what this archive deliberately does
 **not** contain: `./coach-auth`, where that provider keeps its refreshable sign-in. It is a
 sibling of `./data` rather than a folder inside it precisely so that a live credential does not

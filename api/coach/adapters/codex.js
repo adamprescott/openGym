@@ -20,7 +20,12 @@ export function argvFor(model) {
     'exec', '-',              // non-interactive; '-' reads the prompt from stdin
     '--skip-git-repo-check',  // the job dir is a bare mkdtemp, not a repo -- without this it refuses to run
     '--ephemeral',            // do not write session files; the job dir dies with the job anyway
-    '--ignore-user-config'    // $CODEX_HOME/config.toml would be an admin-invisible input to every job
+    '--ignore-user-config',   // $CODEX_HOME/config.toml would be an admin-invisible input to every job
+    '-c', 'cli_auth_credentials_store="file"',
+    '--sandbox', 'read-only',
+    // Coach consumes JSON stdout; it has no reason to read files or execute model commands.
+    // Feature keys verified against the pinned CLI's feature registry and tool planner.
+    '--disable', 'shell_tool', '--disable', 'js_repl', '--disable', 'view_image', '--disable', 'apps', '--disable', 'multi_agent'
   ];
   if (model) argv.push('--model', model);
   return argv;
@@ -39,7 +44,7 @@ export default {
     return { ok: true, version: (r.stdout || '').trim() };
   },
 
-  async invoke({ prompt, jobDir, env, model, timeoutMs }) {
+  async invoke({ prompt, jobDir, env, model, timeoutMs, signal }) {
     const argv = argvFor(model);
     // $CODEX_HOME itself is still set (config.jobEnv), because that is where the CLI keeps its
     // refreshable login cache and a job whose HOME is a temp dir would otherwise find no login
@@ -48,7 +53,7 @@ export default {
     // Sandbox mode is left at the CLI's default (read-only). The job only needs the model
     // to write an answer to stdout, and this process is already an unprivileged user in a
     // container -- widening it here would trade that away for nothing.
-    const r = await run(CLI, argv, { stdin: prompt, cwd: jobDir, env, timeoutMs });
+    const r = await run(CLI, argv, { stdin: prompt, cwd: jobDir, env, timeoutMs, signal, processGroup: true });
     return { ...r, text: (r.stdout || '').trim() };
   }
 };

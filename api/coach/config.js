@@ -62,7 +62,7 @@ export const PROVIDERS = {
   // somewhere is CREDENTIAL_HOME — outside ./data, so `tar czf … data/` cannot capture it.
   codex: {
     label: 'Codex (OpenAI)', runtime: 'Codex CLI',
-    apiKeyEnv: 'CODEX_API_KEY', oauthEnv: null, credentialHomeEnv: 'CODEX_HOME'
+    apiKeyEnv: 'CODEX_API_KEY', oauthEnv: null, credentialHomeEnv: 'CODEX_HOME', deviceLogin: true
   },
   // The plain-HTTPS providers — Anthropic, OpenAI, Gemini and any OpenAI-compatible endpoint.
   // Described once in core/providers.js so the phone's picker and this table cannot disagree.
@@ -180,7 +180,7 @@ export const boundUidFor = (cfg = load(), p = cfg.provider) => (cfg.boundUid && 
 export function saveAuth(provider, auth) {
   const cfg = load();
   const next = { ...cfg.auth };
-  if (auth) next[provider] = auth; else delete next[provider];
+  if (auth) next[provider] = { ...auth, revision: crypto.randomUUID() }; else delete next[provider];
   // boundUid resets with the credential: a new account has not been spent by anyone yet.
   const bound = { ...cfg.boundUid }; delete bound[provider];
   return save({ auth: next, boundUid: bound });
@@ -236,6 +236,7 @@ export function credentialFor(uid) {
 
   if (cfg.authMode === 'profile') {
     const rec = loadProfileAuth(uid);
+    if (rec?.type === 'chatgpt-cli') return { ok: false, reason: 'unsupported-mode', mode: 'profile' };
     const auth = rec && rec.data ? decrypt(rec.data) : null;
     if (!auth || !auth.token) return { ok: false, reason: 'no-credential', mode: 'profile' };
     return { ok: true, auth, type: rec.type, account: rec.account || null, mode: 'profile' };
@@ -247,6 +248,11 @@ export function credentialFor(uid) {
     return { ok: false, reason: 'shared-account', message: SHARED_ACCOUNT_REFUSAL, mode: 'instance' };
   }
   const rec = authFor(cfg);
+  if (cfg.provider === 'codex' && rec?.type === 'chatgpt-cli') {
+    if (!bound || bound !== uid) return { ok: false, reason: 'shared-account', message: SHARED_ACCOUNT_REFUSAL, mode: 'instance' };
+    if (rec.reconnectNeeded || !codexCachePresent()) return { ok: false, reason: 'reconnect', mode: 'instance' };
+    return { ok: true, auth: null, type: rec.type, account: rec.account || null, mode: 'instance' };
+  }
   const auth = rec && rec.data ? decrypt(rec.data) : null;
   if (!auth || !auth.token) {
     // An endpoint that takes no key (a model on the LAN) is connected without one. Only when
@@ -264,7 +270,35 @@ export function credentialFor(uid) {
    the provider terms forbid. An API key is what an admin pastes so their household can use the
    Coach; binding it to whoever happened to click first would just look broken, and the daily
    caps are what bound its spend. */
-export const isPersonalCredential = type => type === 'cli-token' || type === 'oauth';
+export const isPersonalCredential = type => type === 'cli-token' || type === 'oauth' || type === 'chatgpt-cli';
+
+// Presence is local readiness only. The CLI's login status is checked again before invocation.
+// Never parse or return the credential file; Codex alone manages its refreshable contents.
+export function codexCachePresent() {
+  try { return fs.lstatSync(path.join(CREDENTIAL_HOME, 'auth.json')).isFile(); } catch { return false; }
+}
+
+export function credentialRevision(uid) {
+  const cfg = load();
+  const rec = cfg.authMode === 'profile' ? loadProfileAuth(uid) : authFor(cfg);
+  const revision = rec?.revision || (rec?.data ? crypto.createHash('sha256').update(rec.data).digest('hex') : null);
+  return JSON.stringify([cfg.provider, cfg.authMode, revision, boundUidFor(cfg)]);
+}
+
+export function saveCodexSubscription(uid) {
+  const cfg = load();
+  return save({
+    auth: { ...cfg.auth, codex: { type: 'chatgpt-cli', connectedAt: new Date().toISOString(), revision: crypto.randomUUID() } },
+    boundUid: { ...cfg.boundUid, codex: uid }
+  });
+}
+
+export function requireCodexReconnect(revision, uid) {
+  if (credentialRevision(uid) !== revision) return;
+  const cfg = load();
+  const rec = authFor(cfg, 'codex');
+  if (rec?.type === 'chatgpt-cli') save({ auth: { ...cfg.auth, codex: { ...rec, reconnectNeeded: true } } });
+}
 
 /** First profile to actually spend the instance credential binds it — a personal credential
  *  only; an API key is shared by every profile on the instance. */
@@ -310,6 +344,7 @@ export function isConnected() {
   if (cfg.provider === 'fixture') return true;
   if (cfg.authMode === 'profile') return true;
   const rec = authFor(cfg);
+  if (cfg.provider === 'codex' && rec?.type === 'chatgpt-cli') return !rec.reconnectNeeded && !!boundUidFor(cfg) && codexCachePresent();
   if (!rec) return !!providerMeta(cfg).keyOptional && !!baseUrlFor(cfg.provider, cfg);
   return !!decrypt(rec.data);
 }
@@ -340,7 +375,7 @@ export function jobEnv(jobDir, resolved) {
   // A provider whose runtime keeps its own credential cache needs a home that survives the job,
   // because HOME is a temp dir that dies with it. It is deliberately NOT under ./data — see
   // CREDENTIAL_HOME — so the documented backup of ./data cannot pick up a live refresh token.
-  if (meta.credentialHomeEnv) env[meta.credentialHomeEnv] = CREDENTIAL_HOME;
+  if (meta.credentialHomeEnv) env[meta.credentialHomeEnv] = resolved?.type === 'chatgpt-cli' ? CREDENTIAL_HOME : jobDir;
   return env;
 }
 

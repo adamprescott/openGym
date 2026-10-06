@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useUI } from '../store/useUI.js'
 import { useStore } from '../store/useStore.js'
 import { api } from '../lib/api.js'
@@ -36,6 +36,7 @@ export default function AdminCoach() {
   const openSheet = useUI(s => s.openSheet)
   const [d, setD] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [deviceBusy, setDeviceBusy] = useState(false)
   // The models the endpoint serves, fetched on demand. Seeded from the status call when the
   // stored key already let it list them.
   const [models, setModels] = useState(null)
@@ -190,13 +191,14 @@ export default function AdminCoach() {
           <CredentialPill auth={d.auth} />
         </div>
         {authState === 'connected' ? <>
-          <div className="adm-hint">Connected{d.auth.account ? ' as ' + d.auth.account : ''} via {credentialLabel(d.auth.type)}{d.auth.connectedAt ? ' · added ' + rel(d.auth.connectedAt) : ''}. The key is stored encrypted and is never shown again.</div>
+          <div className="adm-hint">Connected{d.auth.account ? ' as ' + d.auth.account : ''} via {credentialLabel(d.auth.type)}{d.auth.connectedAt ? ' · added ' + rel(d.auth.connectedAt) : ''}. {d.auth.type === 'chatgpt-cli' ? 'Only the profile that completed sign-in can spend this subscription. Codex manages the private login cache.' : 'The key is stored encrypted and is never shown again.'}</div>
           <div className="adm-actions">
-            {meta.apiKey && <Button size="sm" variant="tinted" icon="lock" disabled={busy}
+            {meta.apiKey && d.auth.type !== 'chatgpt-cli' && <Button size="sm" variant="tinted" icon="lock" disabled={busy}
               onClick={() => openSheet(close => <ApiKeySheet close={close} onDone={load} label={meta.label} placeholder={meta.keyPlaceholder} optional={meta.keyOptional} />)}>Replace key</Button>}
             <Button size="sm" danger disabled={busy} onClick={disconnect}>Remove</Button>
           </div>
         </> : <>
+          {meta.deviceLogin && <CodexLogin onDone={load} onBusyChange={setDeviceBusy} reconnect={authState === 'reconnect'} />}
           {authState === 'unreadable' && <div className="adm-hint" style={{ color: 'var(--red)' }}>
             The stored credential can't be decrypted. This usually means <code>./data</code> was restored without its <code>secret</code> file. Add the key again to fix it.
           </div>}
@@ -207,7 +209,7 @@ export default function AdminCoach() {
           <div className="adm-actions">
             {meta.setupToken && <Button size="sm" variant="primary" icon="key" disabled={busy}
               onClick={() => openSheet(close => <SetupTokenSheet close={close} onDone={load} label={meta.label} />)}>Add Claude Code token</Button>}
-            {meta.apiKey && <Button size="sm" variant={meta.setupToken ? undefined : 'primary'} icon="lock" disabled={busy}
+            {meta.apiKey && <Button size="sm" variant={meta.setupToken ? undefined : 'primary'} icon="lock" disabled={busy || deviceBusy || authState === 'reconnect'}
               onClick={() => openSheet(close => <ApiKeySheet close={close} onDone={load} label={meta.label} placeholder={meta.keyPlaceholder} optional={meta.keyOptional} />)}>
               {meta.keyOptional ? 'Add API key (optional)' : 'Add API key'}</Button>}
           </div>
@@ -351,6 +353,7 @@ function CredentialPill({ auth }) {
   if (s === 'not-required') return <span className="adm-pill">not needed</span>
   if (s === 'optional') return <span className="adm-pill">optional — none saved</span>
   if (s === 'unreadable') return <span className="adm-pill bad">can't be read</span>
+  if (s === 'reconnect') return <span className="adm-pill bad">reconnect required</span>
   return <span className="adm-pill warn">needed</span>
 }
 
@@ -360,12 +363,69 @@ const credentialHint = (auth, meta) => {
   if (s === 'not-required') return 'Not needed'
   if (s === 'optional') return 'Optional for this endpoint'
   if (s === 'unreadable') return 'Stored key can\'t be read — add it again'
+  if (s === 'reconnect') return 'Subscription login needs reconnecting'
+  if (meta.deviceLogin) return 'ChatGPT subscription or API key'
   return meta.setupToken ? 'Token or API key needed' : 'API key needed'
 }
 
 const credentialLabel = type => ({
   'cli-token': 'Claude Code setup token', 'chatgpt-cli': 'ChatGPT CLI login', oauth: 'legacy token', apikey: 'API key'
 }[type] || 'credential')
+
+export function CodexLogin({ onDone, onBusyChange, reconnect }) {
+  const [login, setLogin] = useState({ state: 'none' })
+  const [error, setError] = useState('')
+  const [working, setWorking] = useState(false)
+  const control = useRef({ working: false, generation: 0, state: 'none' })
+  const onDoneRef = useRef(onDone)
+  onDoneRef.current = onDone
+  useEffect(() => {
+    onBusyChange?.(working || login.state === 'pending' || login.state === 'busy')
+    return () => onBusyChange?.(false)
+  }, [working, login.state, onBusyChange])
+  useEffect(() => {
+    let active = true
+    let polling = false
+    const poll = async () => {
+      if (polling || control.current.working) return
+      polling = true
+      const generation = control.current.generation
+      try {
+        const r = await api('/api/admin/coach/codex/login')
+        if (!active || generation !== control.current.generation) return
+        const completed = r.state === 'connected' && control.current.state !== 'connected'
+        control.current.state = r.state
+        setLogin(r); setError('')
+        if (completed) onDoneRef.current()
+      } catch { if (active && generation === control.current.generation) setError('Could not read sign-in status.') }
+      finally { polling = false }
+    }
+    poll()
+    const timer = setInterval(poll, 2000)
+    return () => { active = false; clearInterval(timer) }
+  }, [])
+  const action = async path => {
+    control.current.working = true; control.current.generation++
+    setWorking(true); setError('')
+    try {
+      if (reconnect && path === 'login') await api('/api/admin/coach/disconnect', { method: 'POST', body: JSON.stringify({ provider: 'codex' }) })
+      setLogin(await api('/api/admin/coach/codex/' + path, { method: 'POST', body: '{}' }))
+    } catch (e) { setError(e.message || 'Sign-in could not be completed.') }
+    finally { control.current.working = false; setWorking(false) }
+  }
+  return <div className="adm-hint">
+    <p>Sign in with your ChatGPT subscription. This connection belongs to your current profile. Device login may need enabling in your OpenAI account settings.</p>
+    {login.state === 'pending' ? <>
+      {login.verificationUrl && <p>Open <a href={login.verificationUrl} target="_blank" rel="noopener noreferrer">OpenAI sign-in</a> and enter <b>{login.userCode}</b>. Complete only the sign-in you started here. Expires at {new Date(login.expiresAt).toLocaleTimeString()}.</p>}
+      {!login.userCode && <p>Waiting for OpenAI's device code…</p>}
+      <Button size="sm" disabled={working} onClick={() => action('cancel')}>Cancel sign-in</Button>
+    </> : <>
+      {login.state === 'busy' ? <p>Another admin has a pending sign-in.</p> : <Button size="sm" disabled={working} onClick={() => action('login')}>{reconnect ? 'Reconnect ChatGPT subscription' : 'Sign in with ChatGPT'}</Button>}
+      {['cancelled', 'expired', 'failed'].includes(login.state) && <p>Sign-in {login.state}. You can start again.</p>}
+    </>}
+    {error && <p style={{ color: 'var(--red)' }}>{error}</p>}
+  </div>
+}
 
 // The failure classes jobs.js emits, in words an operator can act on.
 const failureTitle = cls => ({

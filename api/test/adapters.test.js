@@ -62,7 +62,8 @@ test('the Codex credential cache is a sibling of ./data, never inside it', () =>
   // …and it is actually handed to the runtime, under the variable that provider declares.
   cfg.reset();
   cfg.save({ enabled: true, provider: 'codex' });
-  assert.equal(cfg.jobEnv('/tmp/job', { ok: true }).CODEX_HOME, home);
+  assert.equal(cfg.jobEnv('/tmp/job', { ok: true, type: 'chatgpt-cli' }).CODEX_HOME, home);
+  assert.equal(cfg.jobEnv('/tmp/job', { ok: true, type: 'apikey', auth: { token: 'test' } }).CODEX_HOME, '/tmp/job');
 
   // A provider with no cache of its own is given no such variable at all.
   cfg.reset();
@@ -76,7 +77,9 @@ test('the Codex adapter runs with the three flags that keep host state out of a 
   // session files being written, and --skip-git-repo-check is what lets the bare mkdtemp job dir
   // run at all. Dropping any of them was a green build before this test existed.
   assert.deepEqual(argvFor(null), [
-    'exec', '-', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config'
+    'exec', '-', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config',
+    '-c', 'cli_auth_credentials_store="file"', '--sandbox', 'read-only',
+    '--disable', 'shell_tool', '--disable', 'js_repl', '--disable', 'view_image', '--disable', 'apps', '--disable', 'multi_agent'
   ]);
 });
 

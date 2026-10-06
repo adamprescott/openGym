@@ -2829,6 +2829,7 @@ paths:
       tags: [admin, coach]
       operationId: postAdminCoachDisconnect
       summary: 'Admin: remove the provider credential'
+      description: Codex subscription disconnect is owner-only and refuses while a request runs. Queued work is invalidated before runtime logout.
       requestBody:
         required: false
         content:
@@ -2851,6 +2852,50 @@ paths:
               example: { error: "unknown provider" }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Another owner, pending sign-in, active request, or runtime logout/storage failure. Application authorization is removed before attempting logout.
+
+  /api/admin/coach/codex/login:
+    get:
+      tags: [admin, coach]
+      operationId: getAdminCoachCodexLogin
+      summary: 'Admin: read the initiating profile’s Codex device sign-in state'
+      responses:
+        '200':
+          description: State, expiry and an allowlisted verification URL and one-time code while pending. Other admins see only busy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string, enum: [none, pending, busy, connected, cancelled, expired, failed] }
+                  expiresAt: { type: integer }
+                  verificationUrl: { type: string, format: uri }
+                  userCode: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin, coach]
+      operationId: postAdminCoachCodexLogin
+      summary: 'Admin: start a bounded Codex device sign-in for this profile'
+      responses:
+        '200':
+          description: Pending sign-in started. Only successful ChatGPT authentication saves an owner binding.
+        '409':
+          description: Existing connection, pending attempt, running request, unsupported mode or runtime/storage unavailable.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/admin/coach/codex/cancel:
+    post:
+      tags: [admin, coach]
+      operationId: postAdminCoachCodexCancel
+      summary: 'Admin: cancel your pending Codex sign-in'
+      responses:
+        '200':
+          description: Sign-in cancelled and staged cache discarded.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Admin access required, or attempt belongs to a different admin.
 
 components:
   securitySchemes:
