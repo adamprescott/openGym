@@ -29,7 +29,7 @@ describe('checkForUpdate', () => {
   let originalFetch
 
   beforeEach(() => { originalFetch = globalThis.fetch; resetUpdateCheck() })
-  afterEach(() => { globalThis.fetch = originalFetch })
+  afterEach(() => { globalThis.fetch = originalFetch; vi.unstubAllEnvs() })
 
   function mockFetch(body, status = 200) {
     globalThis.fetch = vi.fn(() => Promise.resolve({
@@ -38,6 +38,13 @@ describe('checkForUpdate', () => {
       json: () => Promise.resolve(body),
     }))
   }
+
+  it('does not contact upstream or offer an upstream APK in a fork build', async () => {
+    vi.stubEnv('VITE_DISABLE_UPDATES', '1')
+    mockFetch([{ tag_name: 'v99.0.0', assets: { links: [{ url: 'https://example.com/upstream.apk' }] } }])
+    expect(await checkForUpdate()).toEqual({ hasUpdate: false, latestVersion: __APP_VERSION__, apkUrl: null, hashUrl: null })
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
 
   it('reports no update when the latest release matches the current version', async () => {
     mockFetch([{ tag_name: 'v' + __APP_VERSION__, assets: { links: [] } }])

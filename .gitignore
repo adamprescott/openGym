@@ -21,3 +21,6 @@ node_modules
 junit.xml
 coverage/
 frontend/bundle-size.json
+
+# Python deployment-check bytecode
+__pycache__/

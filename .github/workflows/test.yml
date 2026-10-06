@@ -3,35 +3,36 @@
 name: Tests
 
 on:
+  workflow_call:
   pull_request:
-    paths:
-      - 'frontend/**'
-      - 'api/**'
-      - 'mcp/**'
-      - 'scripts/build-coach-assets.mjs'
-      - 'scripts/build-coach-library.mjs'
-      - 'api/coach/prompts/**'
-      - '.github/workflows/test.yml'
   push:
-    branches: [main, coach]
-    paths:
-      - 'frontend/**'
-      - 'api/**'
-      - 'mcp/**'
-      - 'scripts/build-coach-assets.mjs'
-      - 'scripts/build-coach-library.mjs'
-      - 'api/coach/prompts/**'
-      - '.github/workflows/test.yml'
+    branches: [coach]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.ref }}
+  group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m unittest discover -s scripts/ci -p 'test_deploy_portainer.py'
+      - name: Validate production Compose with example configuration
+        env:
+          OPENGYM_API_IMAGE: ghcr.io/example/opengym-api
+          OPENGYM_WEB_IMAGE: ghcr.io/example/opengym-web
+          OPENGYM_TAG: sha-0000000000000000000000000000000000000000
+          OPENGYM_HOST: gym.example.test
+          TRAEFIK_NETWORK: example_proxy
+          TRAEFIK_HTTPS_ENTRYPOINT: example_https
+          TRAEFIK_CERT_RESOLVER: example_resolver
+        run: docker compose -f docker-compose.portainer.yml config --quiet
+
   test:
     runs-on: ubuntu-latest
     steps:
