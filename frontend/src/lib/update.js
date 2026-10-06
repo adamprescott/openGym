@@ -49,6 +49,10 @@ export async function checkForUpdate() {
   return cached
 }
 async function fetchLatest() {
+  // A separately signed fork must never offer an upstream APK as its own update.
+  if (import.meta.env.VITE_DISABLE_UPDATES === '1') {
+    return { hasUpdate: false, latestVersion: __APP_VERSION__, apkUrl: null, hashUrl: null }
+  }
   const res = await fetch(RELEASES_URL + '?per_page=1')
   if (!res.ok) throw new Error(`GitLab API ${res.status}`)
   const releases = await res.json()

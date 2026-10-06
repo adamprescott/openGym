@@ -1,88 +1,139 @@
-name: Publish Docker images
+name: Build and deploy containers
 
-# Images are published from a *published release*, never from a bare tag push.
-# A tag that is later deleted (the versioning rule consolidates unreleased tags)
-# would otherwise leave its image tags behind in GHCR forever, and dependency
-# bots read those as a newer version. See issue #87.
-#
-# Tags follow the GitLab registry so both say the same thing: a release publishes
-# `X.Y.Z`, `X.Y` and `latest`; a push to main publishes only `edge`. (`latest` used
-# to follow main here, and a release run overwrote it as well, so thirteen releases
-# published at once left it pointing at whichever finished last.) Re-running the
-# workflow by hand on a `vX.Y.Z` ref republishes exactly that version's tags.
 on:
   push:
     branches: [main]
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
+
+# Serialize the entire pipeline: a slow older build cannot deploy after a newer one.
+concurrency:
+  group: production-containers
+  cancel-in-progress: false
 
 jobs:
+  tests:
+    uses: ./.github/workflows/test.yml
+
   build:
+    needs: tests
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - image: api
-            context: ./api
-            file: ./api/Dockerfile
-          - image: web
-            context: .
-            file: ./web/Dockerfile
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      api_image: ${{ steps.meta.outputs.api_image }}
+      web_image: ${{ steps.meta.outputs.web_image }}
+      api_digest: ${{ steps.api.outputs.digest }}
+      web_digest: ${{ steps.web.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: Lowercase owner (registry names must be lowercase)
-        id: repo
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      - name: Set version metadata
-        id: version_meta
+        with:
+          persist-credentials: false
+      - name: Set image metadata
+        id: meta
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          API_TARGET: ${{ vars.OPENGYM_API_TARGET || 'default' }}
         run: |
-          # On a release the ref is refs/tags/vX.Y.Z; on a main push it is a branch ref,
-          # which would otherwise label the image "refs/heads/main".
-          case "$GITHUB_REF" in
-            refs/tags/*) VERSION="${GITHUB_REF#refs/tags/}" ;;
-            *)           VERSION="main-${GITHUB_SHA::7}" ;;
-          esac
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "VCS_REF=${GITHUB_SHA}" >> $GITHUB_OUTPUT
-          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-
+          case "$API_TARGET" in default|coach) ;; *) echo 'Invalid OPENGYM_API_TARGET'; exit 1 ;; esac
+          owner="${REPOSITORY_OWNER,,}"
+          echo "tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "api_image=ghcr.io/${owner}/opengym-api" >> "$GITHUB_OUTPUT"
+          echo "web_image=ghcr.io/${owner}/opengym-web" >> "$GITHUB_OUTPUT"
+          echo "target=${API_TARGET}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v4
+        if: contains(vars.OPENGYM_PLATFORMS, 'arm64')
       - uses: docker/setup-buildx-action@v4
-
       - uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@v6
-        id: meta
+      - name: Publish API
+        id: api
+        uses: docker/build-push-action@v7
         with:
-          images: ghcr.io/${{ steps.repo.outputs.owner }}/opengym-${{ matrix.image }}
-          tags: |
-            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-
-      - uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.file }}
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            VERSION=${{ steps.version_meta.outputs.VERSION }}
-            VCS_REF=${{ steps.version_meta.outputs.VCS_REF }}
-            BUILD_DATE=${{ steps.version_meta.outputs.BUILD_DATE }}
+          context: ./api
+          file: ./api/Dockerfile
+          target: ${{ steps.meta.outputs.target }}
+          platforms: ${{ vars.OPENGYM_PLATFORMS || 'linux/amd64' }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          tags: ${{ steps.meta.outputs.api_image }}:${{ steps.meta.outputs.tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=api-${{ steps.meta.outputs.target }}
+          cache-to: type=gha,mode=max,scope=api-${{ steps.meta.outputs.target }}
+      - name: Publish web
+        id: web
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./web/Dockerfile
+          platforms: ${{ vars.OPENGYM_PLATFORMS || 'linux/amd64' }}
+          push: true
+          tags: ${{ steps.meta.outputs.web_image }}:${{ steps.meta.outputs.tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+            APP_BUILD=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+      - name: Bootstrap image references
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          API_IMAGE: ${{ steps.meta.outputs.api_image }}
+          WEB_IMAGE: ${{ steps.meta.outputs.web_image }}
+        run: |
+          echo "Published ${API_IMAGE}:${TAG} and ${WEB_IMAGE}:${TAG}."
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && vars.PORTAINER_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check this is still the latest main commit
+        id: current
+        run: |
+          git fetch --no-tags origin main
+          if [ "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA" ]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'A newer main commit exists; skipping this deployment.'
+          fi
+      - name: Deploy and verify the published images
+        if: steps.current.outputs.deploy == 'true'
+        env:
+          PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          PORTAINER_STACK_ID: ${{ secrets.PORTAINER_STACK_ID }}
+          OPENGYM_HEALTH_URL: ${{ secrets.OPENGYM_HEALTH_URL }}
+          OPENGYM_TAG: ${{ needs.build.outputs.tag }}
+          OPENGYM_API_IMAGE: ${{ needs.build.outputs.api_image }}
+          OPENGYM_WEB_IMAGE: ${{ needs.build.outputs.web_image }}
+          OPENGYM_API_DIGEST: ${{ needs.build.outputs.api_digest }}
+          OPENGYM_WEB_DIGEST: ${{ needs.build.outputs.web_digest }}
+        run: python3 scripts/ci/deploy-portainer.py

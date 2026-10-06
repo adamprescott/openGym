@@ -338,3 +338,9 @@ version's source under the same license.
 > media, clear it with the rights holder first.
 
 Full third-party notices, including the body-diagram geometry, are in [NOTICE.md](NOTICE.md).
+
+### Fork deployment
+
+See [Portainer deployment](docs/PORTAINER_DEPLOYMENT.md) for GitHub Actions builds, GHCR images, and private runtime configuration behind Traefik.
+
+See [Android fork builds](docs/ANDROID_FORK.md) for an optional signed APK workflow.

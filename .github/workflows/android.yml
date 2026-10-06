@@ -1,0 +1,111 @@
+name: Build signed Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: 'Android versionCode (must exceed your previously installed build)'
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'release' && vars.ANDROID_RELEASE_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: android-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release configuration
+        env:
+          APPLICATION_ID: ${{ vars.ANDROID_APPLICATION_ID }}
+          VERSION_CODE: ${{ inputs.version_code || vars.ANDROID_VERSION_CODE }}
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          if [[ ! "$APPLICATION_ID" =~ ^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$ ]] || [[ "$APPLICATION_ID" == ch.duartesantos.opengym* ]]; then
+            echo 'Set ANDROID_APPLICATION_ID to a unique fork application ID.'; exit 1
+          fi
+          if [[ ! "$VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]] || (( VERSION_CODE > 2100000000 )); then
+            echo 'Provide a valid increasing Android versionCode.'; exit 1
+          fi
+          echo "ANDROID_APPLICATION_ID=$APPLICATION_ID" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Android SDK components
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - run: npm ci
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - name: Build mobile frontend
+        working-directory: frontend
+        env:
+          VITE_DISABLE_UPDATES: '1'
+          APP_BUILD: ${{ github.sha }}
+        run: npm run build:mobile
+      - name: Build unsigned APK
+        working-directory: frontend/android
+        run: ./gradlew --no-daemon assembleRelease
+      - name: Sign and verify APK
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_KEYSTORE_B64:?Missing signing keystore}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?Missing keystore password}"
+          : "${ANDROID_KEY_ALIAS:?Missing key alias}"
+          export ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+          keystore="$RUNNER_TEMP/android-release.jks"
+          trap 'rm -f "$keystore"' EXIT
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$keystore"
+          mkdir -p apk
+          bt="$ANDROID_HOME/build-tools/35.0.0"
+          "$bt/zipalign" -f -p 4 frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
+          apk="apk/openGym-${ANDROID_VERSION_CODE}.apk"
+          "$bt/apksigner" sign --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD --out "$apk" "$RUNNER_TEMP/aligned.apk"
+          "$bt/apksigner" verify "$apk"
+          cd apk
+          sha256sum *.apk > "openGym-${ANDROID_VERSION_CODE}.apk.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-android-${{ github.run_number }}
+          path: |
+            apk/*.apk
+            apk/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+      - name: Attach APK to the fork release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" apk/*.apk apk/*.sha256 --repo "$GITHUB_REPOSITORY"

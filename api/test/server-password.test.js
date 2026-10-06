@@ -392,7 +392,11 @@ for (const [label, stored] of [['current', () => pwHash], ['older parameters', (
     for (const cookie of cookies) if ((await h.req('GET', '/api/me', { cookie })).status === 200) alive.push(cookie);
     assert.equal(alive.length, 0, `${alive.length} of ${cookies.length} sessions signed with the old password survived the change`);
     assert.equal((await h.req('GET', '/api/me', { cookie: done.cookie })).status, 200, "the owner's own session carries on");
-    assert.equal((await login(h, 'Ana', next, '203.0.113.201')).status, 200);
+    // Some deliberately old-password attempts can start after the change has landed.
+    // They are genuine wrong guesses and may pause this account even from fresh addresses.
+    // Check the new password through a fresh server, leaving that legitimate throttle intact.
+    const fresh = await startServer(t, { users: h.db().users });
+    assert.equal((await login(fresh, 'Ana', next, '203.0.113.201')).status, 200);
   });
 }
 

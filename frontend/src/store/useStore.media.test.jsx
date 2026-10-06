@@ -71,6 +71,10 @@ describe('owed photos and videos', () => {
   })
 
   it('going ahead anyway keeps the copy in the stash, and its files survive the sign-out', async () => {
+    // These are pre-existing files, not writes racing with sign-out. A real clock can
+    // put the orphan in the same millisecond as cleanup's cutoff, correctly retaining it.
+    media = createMediaStore(memoryBackend(), { now: () => 1 })
+    _setMediaStore(media)
     await signedInWithPendingPhoto()
     await media.put('c'.repeat(64), new Blob(['x']), { mime: 'image/png', pending: false })   // nobody's
     const r = await useStore.getState().signOut({ force: true })
