@@ -16,13 +16,9 @@
                  somebody's personal subscription is being spent by people who are not the
                  subscriber.
 
-   openGym does not interpret any provider's terms on a self-hoster's behalf. It just makes
-   the shape that doesn't need the interpretation available, and refuses the shape that does:
-   in instance mode a *personal* credential (a Claude Code setup token, an OAuth login) binds
-   to the first profile that uses it, and any other profile is refused rather than warned. A
-   warning moves the decision onto whoever clicks past it — the same posture payload.js takes
-   with its allowlist. An API key is the other shape: metered, issued for exactly this kind of
-   use, and shared by every profile on the instance under the daily caps. */
+   Personal credentials default to their owner. An explicit per-provider access list can
+   delegate use to selected profiles without exposing credentials or granting admin rights.
+   API keys retain their existing instance-wide default until a selected-user list is set. */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -62,7 +58,7 @@ export const PROVIDERS = {
   // somewhere is CREDENTIAL_HOME — outside ./data, so `tar czf … data/` cannot capture it.
   codex: {
     label: 'Codex (OpenAI)', runtime: 'Codex CLI',
-    apiKeyEnv: 'CODEX_API_KEY', oauthEnv: null, credentialHomeEnv: 'CODEX_HOME'
+    apiKeyEnv: 'CODEX_API_KEY', oauthEnv: null, credentialHomeEnv: 'CODEX_HOME', deviceLogin: true
   },
   // The plain-HTTPS providers — Anthropic, OpenAI, Gemini and any OpenAI-compatible endpoint.
   // Described once in core/providers.js so the phone's picker and this table cannot disagree.
@@ -79,6 +75,7 @@ const DEFAULTS = {
   auth: {},                                          // instance mode: { [provider]: { type, account, data:<encrypted>, connectedAt } }
   models: {},                                        // { [provider]: model id }
   providerOptions: {},                               // { [provider]: { baseUrl } }
+  credentialAccess: {},                              // { [provider]: { uids, revision } }; absent preserves existing access
   boundUid: {},                                      // instance mode: { [provider]: the profile its credential bound to }
   caps: { perProfileDaily: 10, instanceDaily: 0 },   // 0 = unlimited
   daily: null,                                       // { date, count }: jobs enqueued today across every profile
@@ -95,7 +92,7 @@ const DEFAULTS = {
 };
 export const MAX_MESSAGE_LEN_FLOOR = 200;
 export const MAX_MESSAGE_LEN_CEILING = 4000;
-const PER_PROVIDER = ['auth', 'models', 'providerOptions', 'boundUid'];
+const PER_PROVIDER = ['auth', 'models', 'providerOptions', 'boundUid', 'credentialAccess'];
 const isPlainObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
 const LOG_MAX = 100;
 
@@ -180,10 +177,31 @@ export const boundUidFor = (cfg = load(), p = cfg.provider) => (cfg.boundUid && 
 export function saveAuth(provider, auth) {
   const cfg = load();
   const next = { ...cfg.auth };
-  if (auth) next[provider] = auth; else delete next[provider];
+  if (auth) next[provider] = { ...auth, revision: crypto.randomUUID() }; else delete next[provider];
   // boundUid resets with the credential: a new account has not been spent by anyone yet.
   const bound = { ...cfg.boundUid }; delete bound[provider];
-  return save({ auth: next, boundUid: bound });
+  const access = { ...cfg.credentialAccess }; delete access[provider];
+  return save({ auth: next, boundUid: bound, credentialAccess: access });
+}
+export function accessFor(cfg = load(), provider = cfg.provider) {
+  const policy = cfg.credentialAccess?.[provider];
+  return { selectedOnly: !!policy, uids: Array.isArray(policy?.uids) ? policy.uids : [], ownerUid: boundUidFor(cfg, provider) };
+}
+export function setCredentialAccess(provider, uids) {
+  const cfg = load();
+  return save({ credentialAccess: { ...cfg.credentialAccess, [provider]: { uids: [...new Set(uids)].sort(), revision: crypto.randomUUID() } } });
+}
+export function revokeCredentialAccess(uid) {
+  const cfg = load(), access = { ...cfg.credentialAccess };
+  let changed = false;
+  for (const provider of Object.keys(PROVIDERS)) {
+    const p = access[provider];
+    if (boundUidFor(cfg, provider) === uid || p?.uids?.includes(uid)) {
+      access[provider] = { uids: boundUidFor(cfg, provider) === uid ? [] : p.uids.filter(id => id !== uid), revision: crypto.randomUUID() };
+      changed = true;
+    }
+  }
+  if (changed) save({ credentialAccess: access });
 }
 export function saveModel(provider, model) {
   const next = { ...load().models };
@@ -220,7 +238,7 @@ export function clearProfileAuth(uid) {
 /* ---------- which credential pays for this job ---------- */
 
 export const SHARED_ACCOUNT_REFUSAL =
-  'This instance is configured with a single shared account — ask your admin to enable per-profile sign-in.';
+  'Your profile does not have access to the stored Coach account. Ask its owner or an admin for access.';
 
 /**
  * Resolve the credential for one profile, or say why there isn't one. Never throws and never
@@ -236,6 +254,7 @@ export function credentialFor(uid) {
 
   if (cfg.authMode === 'profile') {
     const rec = loadProfileAuth(uid);
+    if (rec?.type === 'chatgpt-cli') return { ok: false, reason: 'unsupported-mode', mode: 'profile' };
     const auth = rec && rec.data ? decrypt(rec.data) : null;
     if (!auth || !auth.token) return { ok: false, reason: 'no-credential', mode: 'profile' };
     return { ok: true, auth, type: rec.type, account: rec.account || null, mode: 'profile' };
@@ -243,10 +262,17 @@ export function credentialFor(uid) {
 
   // instance mode
   const bound = boundUidFor(cfg);
-  if (bound && bound !== uid) {
+  const policy = cfg.credentialAccess?.[cfg.provider];
+  const selected = Array.isArray(policy?.uids) && policy.uids.includes(uid);
+  if ((policy && uid !== bound && !selected) || (bound && bound !== uid && !selected)) {
     return { ok: false, reason: 'shared-account', message: SHARED_ACCOUNT_REFUSAL, mode: 'instance' };
   }
   const rec = authFor(cfg);
+  if (cfg.provider === 'codex' && rec?.type === 'chatgpt-cli') {
+    if (!bound || (bound !== uid && !selected)) return { ok: false, reason: 'shared-account', message: SHARED_ACCOUNT_REFUSAL, mode: 'instance' };
+    if (rec.reconnectNeeded || !codexCachePresent()) return { ok: false, reason: 'reconnect', mode: 'instance' };
+    return { ok: true, auth: null, type: rec.type, account: rec.account || null, mode: 'instance' };
+  }
   const auth = rec && rec.data ? decrypt(rec.data) : null;
   if (!auth || !auth.token) {
     // An endpoint that takes no key (a model on the LAN) is connected without one. Only when
@@ -257,14 +283,38 @@ export function credentialFor(uid) {
   return { ok: true, auth, type: rec.type, account: rec.account || null, mode: 'instance' };
 }
 
-/* Which credential types are one person's *subscription* — a Claude Code setup token or an
-   OAuth login — as opposed to an API key, which is metered, pay-per-use, and issued precisely
-   so that software can call the provider on behalf of many people. The binding below exists
-   for the first kind: spending someone's personal subscription from another profile is what
-   the provider terms forbid. An API key is what an admin pastes so their household can use the
-   Coach; binding it to whoever happened to click first would just look broken, and the daily
-   caps are what bound its spend. */
-export const isPersonalCredential = type => type === 'cli-token' || type === 'oauth';
+/* Personal credentials retain an owner even when use is delegated. */
+export const isPersonalCredential = type => type === 'cli-token' || type === 'oauth' || type === 'chatgpt-cli';
+
+// Presence is local readiness only. The CLI's login status is checked again before invocation.
+// Never parse or return the credential file; Codex alone manages its refreshable contents.
+export function codexCachePresent() {
+  try { return fs.lstatSync(path.join(CREDENTIAL_HOME, 'auth.json')).isFile(); } catch { return false; }
+}
+
+export function credentialRevision(uid, cfg = load()) {
+  const rec = cfg.authMode === 'profile' ? loadProfileAuth(uid) : authFor(cfg);
+  const revision = rec?.revision || (rec?.data ? crypto.createHash('sha256').update(rec.data).digest('hex') : null);
+  return JSON.stringify([cfg.provider, cfg.authMode, revision, boundUidFor(cfg), cfg.credentialAccess?.[cfg.provider] || null]);
+}
+
+export const accessRevision = (uid, cfg = load()) => crypto.createHash('sha256').update(credentialRevision(uid, cfg)).digest('hex');
+
+export function saveCodexSubscription(uid) {
+  const cfg = load();
+  return save({
+    auth: { ...cfg.auth, codex: { type: 'chatgpt-cli', connectedAt: new Date().toISOString(), revision: crypto.randomUUID() } },
+    credentialAccess: Object.fromEntries(Object.entries(cfg.credentialAccess || {}).filter(([p]) => p !== 'codex')),
+    boundUid: { ...cfg.boundUid, codex: uid }
+  });
+}
+
+export function requireCodexReconnect(revision, uid) {
+  if (credentialRevision(uid) !== revision) return;
+  const cfg = load();
+  const rec = authFor(cfg, 'codex');
+  if (rec?.type === 'chatgpt-cli') save({ auth: { ...cfg.auth, codex: { ...rec, reconnectNeeded: true } } });
+}
 
 /** First profile to actually spend the instance credential binds it — a personal credential
  *  only; an API key is shared by every profile on the instance. */
@@ -310,6 +360,7 @@ export function isConnected() {
   if (cfg.provider === 'fixture') return true;
   if (cfg.authMode === 'profile') return true;
   const rec = authFor(cfg);
+  if (cfg.provider === 'codex' && rec?.type === 'chatgpt-cli') return !rec.reconnectNeeded && !!boundUidFor(cfg) && codexCachePresent();
   if (!rec) return !!providerMeta(cfg).keyOptional && !!baseUrlFor(cfg.provider, cfg);
   return !!decrypt(rec.data);
 }
@@ -340,7 +391,7 @@ export function jobEnv(jobDir, resolved) {
   // A provider whose runtime keeps its own credential cache needs a home that survives the job,
   // because HOME is a temp dir that dies with it. It is deliberately NOT under ./data — see
   // CREDENTIAL_HOME — so the documented backup of ./data cannot pick up a live refresh token.
-  if (meta.credentialHomeEnv) env[meta.credentialHomeEnv] = CREDENTIAL_HOME;
+  if (meta.credentialHomeEnv) env[meta.credentialHomeEnv] = resolved?.type === 'chatgpt-cli' ? CREDENTIAL_HOME : jobDir;
   return env;
 }
 

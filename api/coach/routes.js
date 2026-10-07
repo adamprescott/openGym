@@ -11,6 +11,7 @@ import { adapterFor } from './adapters/index.js';
 import { canDropPrivileges } from './adapters/spawn.js';
 import { DATA_CATEGORIES } from './core/payload.js';
 import { validateBaseUrl, baseUrlFor } from './core/providers.js';
+import * as codexAuth from './codex-auth.js';
 
 // Job failures the user sees, in the app's own voice. The raw provider detail never reaches
 // them — it goes to the admin card, which is where someone can act on it (FR-47).
@@ -26,7 +27,7 @@ const USER_ERROR = {
 };
 const HTTP_FOR = { off: 503, busy: 409, cap: 429, consent: 403, shared: 409, unprivileged: 503 };
 
-export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
+export function coachRoutes({ json, readBody, readSession, requireAdmin, listUsers = () => [] }) {
   /** Every user route starts the same way: signed in, feature on, feature reachable. */
   const guard = (req, res) => {
     const user = readSession(req);
@@ -142,9 +143,11 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
       if (!requireAdmin(req, res)) return;
       const cfg = cfgStore.load();
       const adapter = adapterFor(cfg.provider);
+      const subscriptionReady = cfg.provider === 'codex' && cfgStore.authFor(cfg)?.type === 'chatgpt-cli'
+        ? cfg.authMode === 'instance' && !!cfgStore.boundUidFor(cfg) && !cfgStore.authFor(cfg).reconnectNeeded && cfgStore.codexCachePresent() && await codexAuth.cachedLoginStatus() : false;
       // For the runtime-backed providers this asks "is the runtime there"; for an HTTPS one it
       // lists the models with the stored key, which is the round trip the card wants anyway.
-      const cred = adapter?.spawns === false ? cfgStore.credentialFor(cfgStore.boundUidFor(cfg)) : undefined;
+      const cred = adapter?.spawns === false ? cfgStore.credentialFor(readSession(req)?.id) : undefined;
       const check = adapter ? await adapter.check(cfg, cfgStore.jobEnv(process.env.TMPDIR || '/tmp', cred?.ok ? cred : undefined)) : { ok: false, error: 'unknown provider' };
       const log = cfg.log || [];
       const today = new Date().toISOString().slice(0, 10);
@@ -158,7 +161,7 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
           http: !!p.http, baseUrl: !!p.baseUrl, keyOptional: !!p.keyOptional, keyPlaceholder: p.keyPlaceholder || null,
           defaultModel: p.defaultModel || null,
           // Which providers already hold a key — so switching chips is visibly not a reset.
-          connected: !!(cfgStore.authFor(cfg, id) && cfgStore.authFor(cfg, id).data)
+          connected: !!(cfgStore.authFor(cfg, id)?.data || (id === 'codex' && cfg.authMode === 'instance' && cfgStore.boundUidFor(cfg, id) && cfgStore.authFor(cfg, id)?.type === 'chatgpt-cli' && !cfgStore.authFor(cfg, id).reconnectNeeded && cfgStore.codexCachePresent()))
         })),
         model: cfgStore.modelFor(cfg),
         models: cfg.models,
@@ -168,6 +171,8 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
         maxMessageLen: cfg.maxMessageLen,
         community: !!cfg.community,
         runtime: { ok: !!check.ok, version: check.version || null, error: check.error || null, needsKey: !!check.needsKey },
+        credentialAccess: { ...cfgStore.accessFor(cfg), revision: cfgStore.accessRevision(readSession(req)?.id, cfg) },
+        canManageAccess: !cfgStore.boundUidFor(cfg) || cfgStore.boundUidFor(cfg) === readSession(req)?.id,
         authMode: cfg.authMode,
         boundUid: cfgStore.boundUidFor(cfg),
         /* Whether a credential is filed, and whose — never the credential. `unreadable` is its
@@ -177,6 +182,10 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
         auth: (() => {
           const meta = cfgStore.providerMeta(cfg);
           const rec = cfgStore.authFor(cfg);
+          if (cfg.provider === 'codex' && rec?.type === 'chatgpt-cli') return {
+            state: subscriptionReady ? 'connected' : 'reconnect',
+            type: rec.type, connectedAt: rec.connectedAt || null
+          };
           if (!meta.oauthEnv && !meta.apiKeyEnv) return { state: 'not-required' };
           if (!rec || !rec.data) return { state: meta.keyOptional ? 'optional' : 'none' };
           if (!cfgStore.decrypt(rec.data)) return { state: 'unreadable' };
@@ -242,21 +251,41 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
       json(res, 200, { ok: true });
     },
 
+    'POST /api/admin/coach/access': async (req, res) => {
+      if (!requireAdmin(req, res)) return;
+      const body = await readBody(req);
+      if (!requireAdmin(req, res)) return;
+      const cfg = cfgStore.load(), uid = readSession(req)?.id;
+      if (cfg.authMode !== 'instance' || !cfgStore.authFor(cfg)) return json(res, 409, { error: 'Connect a stored instance credential first.' });
+      const owner = cfgStore.boundUidFor(cfg);
+      if (owner && owner !== uid) return json(res, 403, { error: 'Only the credential owner can change access.' });
+      if (!owner && cfgStore.isPersonalCredential(cfgStore.authFor(cfg)?.type)) return json(res, 409, { error: 'Test the Coach to establish the credential owner before sharing access.' });
+      // Require the displayed connection version: a stale card cannot grant use of a new account.
+      if (body.provider !== cfg.provider || body.revision !== cfgStore.accessRevision(uid)) return json(res, 409, { error: 'The connection or access settings changed. Refresh and retry.' });
+      if (!Array.isArray(body.uids) || body.uids.length > 1000 || body.uids.some(id => typeof id !== 'string')) return json(res, 400, { error: 'Choose a valid list of users.' });
+      const existing = new Set(listUsers().map(u => u.id));
+      if (body.uids.some(id => !existing.has(id))) return json(res, 400, { error: 'A selected user no longer exists. Refresh and retry.' });
+      cfgStore.setCredentialAccess(cfg.provider, body.uids.filter(id => id !== owner));
+      json(res, 200, { ok: true });
+    },
+
     'POST /api/admin/coach/test': async (req, res) => {
       if (!requireAdmin(req, res)) return;
-      const r = await jobs.testRun();
+      const r = await jobs.testRun(readSession(req)?.id);
       json(res, 200, r);
     },
 
     /* The models the configured endpoint serves, so the card can offer a list rather than a
-       text field that goes stale with every model release. HTTPS providers only. */
+       text field that goes stale with every model release. */
     'POST /api/admin/coach/models': async (req, res) => {
       if (!requireAdmin(req, res)) return;
       const cfg = cfgStore.load();
+      if (cfg.provider === 'codex') return json(res, 200, await jobs.listRuntimeModels(readSession(req)?.id));
       const adapter = adapterFor(cfg.provider);
       if (!adapter || typeof adapter.models !== 'function') return json(res, 200, { ok: false, error: 'this provider does not list models', models: [] });
-      const cred = cfgStore.credentialFor(cfgStore.boundUidFor(cfg));
-      const env = cfgStore.jobEnv(process.env.TMPDIR || '/tmp', cred.ok ? cred : undefined);
+      const cred = cfgStore.credentialFor(readSession(req)?.id);
+      if (!cred.ok) return json(res, 200, { ok: false, models: [], error: 'This profile cannot list models for the configured account.' });
+      const env = cfgStore.jobEnv(process.env.TMPDIR || '/tmp', cred);
       json(res, 200, await adapter.models(cfg, env));
     },
 
@@ -277,6 +306,10 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
       const provider = body.provider !== undefined ? String(body.provider) : cfg.provider;
       if (!cfgStore.PROVIDERS[provider]) return json(res, 400, { error: 'unknown provider' });
       const meta = cfgStore.PROVIDERS[provider];
+      if (provider === 'codex' && (codexAuth.authChanging() || codexAuth.loginState(readSession(req)?.id).state === 'pending' || codexAuth.loginState(readSession(req)?.id).state === 'busy')) {
+        return json(res, 409, { error: 'Cancel the pending subscription sign-in before adding a key.' });
+      }
+      if (provider === 'codex' && cfgStore.authFor(cfg, provider)?.type === 'chatgpt-cli') return json(res, 409, { error: 'Disconnect the subscription before adding an API key.' });
       const type = String(body.type || '');
       const envVar = (type === 'cli-token' || type === 'oauth') ? meta.oauthEnv
         : type === 'apikey' ? meta.apiKeyEnv : null;
@@ -296,8 +329,27 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
       const body = await readBody(req);
       const provider = body.provider !== undefined ? String(body.provider) : cfgStore.load().provider;
       if (!cfgStore.PROVIDERS[provider]) return json(res, 400, { error: 'unknown provider' });
+      if (provider === 'codex' && (cfgStore.authFor(cfgStore.load(), provider)?.type === 'chatgpt-cli' || ['pending', 'busy'].includes(codexAuth.loginState(readSession(req)?.id).state))) {
+        const r = await codexAuth.disconnect(readSession(req)?.id);
+        return json(res, r.ok ? 200 : 409, r);
+      }
       cfgStore.saveAuth(provider, null);
       json(res, 200, { ok: true });
+    },
+
+    'POST /api/admin/coach/codex/login': async (req, res) => {
+      if (!requireAdmin(req, res)) return;
+      const r = await codexAuth.startLogin(readSession(req)?.id);
+      json(res, r.ok ? 200 : 409, r);
+    },
+    'GET /api/admin/coach/codex/login': async (req, res) => {
+      if (!requireAdmin(req, res)) return;
+      json(res, 200, codexAuth.loginState(readSession(req)?.id));
+    },
+    'POST /api/admin/coach/codex/cancel': async (req, res) => {
+      if (!requireAdmin(req, res)) return;
+      const r = await codexAuth.cancelLogin(readSession(req)?.id);
+      json(res, r.ok ? 200 : 403, r);
     },
 
     /* Still absent: `authMode`, and with it the per-profile credential routes. Instance mode is

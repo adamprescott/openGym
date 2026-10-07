@@ -162,6 +162,43 @@ jobs:
           # else in the container would undo the point of dropping privileges at all.
           test "$(docker run --rm opengym-api:coach stat -c '%U %a' /coach-auth)" = "coach 700"
 
+      - name: pinned Codex accepts Coach flags and disables model file-reading tools
+        # This gate reads only CLI metadata/help with an empty temporary home. It makes no
+        # sign-in or model request and needs no credentials or deployment configuration.
+        # Keep the command options derived from the adapter to catch pinned-CLI drift.
+        # Actual sandbox/model execution remains an owner-authorized smoke test.
+        run: |
+          docker run --rm --user coach opengym-api:coach node --input-type=module -e '
+            import fs from "node:fs";
+            import os from "node:os";
+            import path from "node:path";
+            import { spawnSync } from "node:child_process";
+            import { argvFor } from "./coach/adapters/codex.js";
+            const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-check-"));
+            const env = { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: home, CODEX_HOME: home, TMPDIR: home };
+            const options = argvFor(null);
+            const controlled = [];
+            const disabled = [];
+            for (let i = 0; i < options.length; i++) {
+              if (options[i] === "-c" || options[i] === "--disable") {
+                controlled.push(options[i], options[i + 1]);
+                if (options[i] === "--disable") disabled.push(options[i + 1]);
+                i++;
+              }
+            }
+            try {
+              const help = spawnSync("codex", [...options, "--help"], { env, encoding: "utf8", timeout: 20000 });
+              if (help.status !== 0) throw new Error("Codex rejected Coach execution flags");
+              const list = spawnSync("codex", [...controlled, "features", "list"], { env, encoding: "utf8", timeout: 20000 });
+              if (list.status !== 0) throw new Error("Codex feature introspection failed");
+              for (const key of disabled) {
+                const line = list.stdout.split("\n").find(row => row.trim().split(/\s+/)[0] === key);
+                if (!line || !/\bfalse\s*$/.test(line)) throw new Error(`Codex feature ${key} was not disabled`);
+              }
+              console.log("Coach CLI flags accepted; model file-reading and execution features disabled");
+            } finally { fs.rmSync(home, { recursive: true, force: true }); }
+          '
+
       - name: neither Codex nor its sandbox is in the default image
         run: |
           # bubblewrap is a Codex requirement, so an owner who never opted in should not be

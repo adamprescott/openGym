@@ -67,26 +67,35 @@ export function canDropPrivileges() {
  * Never rejects on a non-zero exit: the caller classifies failures, and a CLI that prints a
  * useful error and exits 1 is more informative than a thrown Error with none of it.
  */
-export function run(cmd, argv, { stdin = '', env = {}, cwd, timeoutMs = 300000, asCoach = true } = {}) {
+export function run(cmd, argv, { stdin = '', env = {}, cwd, timeoutMs = 300000, asCoach = true, signal, onOutput, processGroup = false } = {}) {
   return new Promise(resolve => {
     const ids = asCoach ? unprivilegedIds() : null;
     let child;
     try {
-      child = spawn(cmd, argv, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'], ...(ids || {}) });
+      child = spawn(cmd, argv, { cwd, env, detached: processGroup && process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'], ...(ids || {}) });
     } catch (e) {
       resolve({ code: -1, stdout: '', stderr: e.message, spawnError: true });
       return;
     }
     let stdout = '', stderr = '', timedOut = false, done = false;
+    const abort = () => {
+      try {
+        if (processGroup && process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch { /* already exited */ }
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     // Output is bounded: a CLI stuck in a loop must not take the server's memory with it.
     const CAP = 4 * 1024 * 1024;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    child.stdout.on('data', d => { if (stdout.length < CAP) stdout += d; });
-    child.stderr.on('data', d => { if (stderr.length < CAP) stderr += d; });
+    const timer = setTimeout(() => { timedOut = true; abort(); }, timeoutMs);
+    child.stdout.on('data', d => { if (stdout.length < CAP) { stdout += d; onOutput?.(String(d)); } });
+    child.stderr.on('data', d => { if (stderr.length < CAP) { stderr += d; onOutput?.(String(d)); } });
     const finish = (code, err) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       resolve({ code, stdout, stderr: stderr || (err ? err.message : ''), timedOut, spawnError: !!err });
     };
     child.on('error', e => finish(-1, e));

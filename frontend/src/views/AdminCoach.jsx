@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useUI } from '../store/useUI.js'
 import { useStore } from '../store/useStore.js'
 import { api } from '../lib/api.js'
@@ -36,9 +36,12 @@ export default function AdminCoach() {
   const openSheet = useUI(s => s.openSheet)
   const [d, setD] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [deviceBusy, setDeviceBusy] = useState(false)
   // The models the endpoint serves, fetched on demand. Seeded from the status call when the
   // stored key already let it list them.
   const [models, setModels] = useState(null)
+  const [runtimeDefault, setRuntimeDefault] = useState(null)
+  const modelContext = useRef(null)
   // The last "Test the Coach" outcome, shown inline where the button is rather than only as a
   // toast that is gone before anyone has read the provider's reason.
   const [testResult, setTestResult] = useState(null)
@@ -47,7 +50,13 @@ export default function AdminCoach() {
   // that once per boot, and the Plan tab's Coach card hangs off it: without the re-read, an admin
   // who has just switched the Coach on and connected it finds no Coach anywhere until a reload,
   // which reads as a setup that failed (Discord #install-help, 2026-09-19).
-  const load = () => api('/api/admin/coach').then(r => { setD(r); setModels(r.knownModels || null); useStore.getState().refreshConfig() }).catch(e => toast(e.message || 'Failed to load'))
+  const load = () => api('/api/admin/coach').then(r => {
+    const context = JSON.stringify([r.provider, r.authMode, r.boundUid, r.auth?.state, r.auth?.connectedAt, r.credentialAccess?.revision])
+    if (context !== modelContext.current) { setModels(r.knownModels || null); setRuntimeDefault(null) }
+    else if (r.knownModels) setModels(r.knownModels)
+    modelContext.current = context
+    setD(r); useStore.getState().refreshConfig()
+  }).catch(e => toast(e.message || 'Failed to load'))
   useEffect(() => { load() }, [])
 
   const patch = async body => {
@@ -58,11 +67,13 @@ export default function AdminCoach() {
   }
   const loadModels = async () => {
     setBusy(true)
+    const context = modelContext.current
     try {
       const r = await api('/api/admin/coach/models', { method: 'POST', body: '{}' })
-      if (r.ok) { setModels(r.models); toast(r.models.length + ' models') } else toast(r.error || 'Could not list models')
+      if (context !== modelContext.current) return
+      if (r.ok) { setModels(r.models); setRuntimeDefault(r.defaultModel || null); toast(r.models.length + ' models') } else toast(r.error || 'Could not list models')
     } catch (e) { toast(e.message) }
-    setBusy(false)
+    finally { setBusy(false) }
   }
   const test = async () => {
     setBusy(true); setTestResult({ pending: true })
@@ -91,6 +102,7 @@ export default function AdminCoach() {
   </div>
 
   const meta = d.providers.find(p => p.id === d.provider) || {}
+  const defaultModel = runtimeDefault || meta.defaultModel
   const authState = d.auth?.state
   const authed = authState === 'connected' || authState === 'not-required' || authState === 'optional'
   const needsEndpoint = !!meta.baseUrl
@@ -190,13 +202,14 @@ export default function AdminCoach() {
           <CredentialPill auth={d.auth} />
         </div>
         {authState === 'connected' ? <>
-          <div className="adm-hint">Connected{d.auth.account ? ' as ' + d.auth.account : ''} via {credentialLabel(d.auth.type)}{d.auth.connectedAt ? ' · added ' + rel(d.auth.connectedAt) : ''}. The key is stored encrypted and is never shown again.</div>
+          <div className="adm-hint">Connected{d.auth.account ? ' as ' + d.auth.account : ''} via {credentialLabel(d.auth.type)}{d.auth.connectedAt ? ' · added ' + rel(d.auth.connectedAt) : ''}. {d.auth.type === 'chatgpt-cli' ? 'Only the profile that completed sign-in can spend this subscription. Codex manages the private login cache.' : 'The key is stored encrypted and is never shown again.'}</div>
           <div className="adm-actions">
-            {meta.apiKey && <Button size="sm" variant="tinted" icon="lock" disabled={busy}
+            {meta.apiKey && d.auth.type !== 'chatgpt-cli' && <Button size="sm" variant="tinted" icon="lock" disabled={busy}
               onClick={() => openSheet(close => <ApiKeySheet close={close} onDone={load} label={meta.label} placeholder={meta.keyPlaceholder} optional={meta.keyOptional} />)}>Replace key</Button>}
             <Button size="sm" danger disabled={busy} onClick={disconnect}>Remove</Button>
           </div>
         </> : <>
+          {meta.deviceLogin && <CodexLogin onDone={load} onBusyChange={setDeviceBusy} reconnect={authState === 'reconnect'} />}
           {authState === 'unreadable' && <div className="adm-hint" style={{ color: 'var(--red)' }}>
             The stored credential can't be decrypted. This usually means <code>./data</code> was restored without its <code>secret</code> file. Add the key again to fix it.
           </div>}
@@ -207,7 +220,7 @@ export default function AdminCoach() {
           <div className="adm-actions">
             {meta.setupToken && <Button size="sm" variant="primary" icon="key" disabled={busy}
               onClick={() => openSheet(close => <SetupTokenSheet close={close} onDone={load} label={meta.label} />)}>Add Claude Code token</Button>}
-            {meta.apiKey && <Button size="sm" variant={meta.setupToken ? undefined : 'primary'} icon="lock" disabled={busy}
+            {meta.apiKey && <Button size="sm" variant={meta.setupToken ? undefined : 'primary'} icon="lock" disabled={busy || deviceBusy || authState === 'reconnect'}
               onClick={() => openSheet(close => <ApiKeySheet close={close} onDone={load} label={meta.label} placeholder={meta.keyPlaceholder} optional={meta.keyOptional} />)}>
               {meta.keyOptional ? 'Add API key (optional)' : 'Add API key'}</Button>}
           </div>
@@ -215,24 +228,29 @@ export default function AdminCoach() {
       </Step>}
 
       {/* ---------- model ---------- */}
-      <Step n={num()} title="Model" hint={d.model || (meta.defaultModel ? 'default: ' + meta.defaultModel : 'not chosen yet')} done={step4Done} {...stepAt()}>
+      <Step n={num()} title="Model" hint={d.model || (defaultModel ? 'default: ' + defaultModel : 'runtime default')} done={step4Done} {...stepAt()}>
         <div className="adm-hint">{meta.http
           ? 'Which model the provider should use. "List models" asks the provider for its current list, so nothing here goes stale.'
           : 'Optional. Leave it empty to use the runtime\'s own default.'}</div>
         <div className="adm-field">
           <label>Model</label>
           {models && models.length
-            ? <select className="adm-select" value={models.includes(d.model) ? d.model : ''} disabled={busy} onChange={e => patch({ model: e.target.value })}>
-              <option value="">{meta.defaultModel ? `Default (${meta.defaultModel})` : 'Pick a model…'}</option>
+            ? <select aria-label="Model" className="adm-select" value={d.models?.[d.provider] || ''} disabled={busy} onChange={e => patch({ model: e.target.value })}>
+              <option value="">{defaultModel ? `Default (${defaultModel})` : meta.http ? 'Pick a model…' : 'Runtime default (not reported)'}</option>
               {d.model && !models.includes(d.model) && <option value={d.model}>{d.model} (not in the list)</option>}
               {models.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
-            : <TextField key={d.provider} defaultValue={d.models?.[d.provider] || ''} placeholder={meta.defaultModel ? `Default: ${meta.defaultModel}` : needsEndpoint ? 'e.g. qwen2.5:3b — or press "List models"' : '(runtime default)'}
+            : <TextField key={d.provider} defaultValue={d.models?.[d.provider] || ''} placeholder={defaultModel ? `Default: ${defaultModel}` : needsEndpoint ? 'e.g. qwen2.5:3b — or press "List models"' : '(runtime default)'}
               onBlur={e => e.target.value !== (d.models?.[d.provider] || '') && patch({ model: e.target.value })} />}
         </div>
-        {meta.http && <div className="adm-actions">
+        {(meta.http || d.provider === 'codex') && <div className="adm-actions">
           <Button size="sm" variant="tinted" icon="reset" disabled={busy} onClick={loadModels}>{models ? 'Refresh list' : 'List models'}</Button>
           {models && models.length ? <span className="dim small" style={{ alignSelf: 'center' }}>{models.length} served by the provider</span> : null}
+        </div>}
+        {d.provider === 'codex' && <div className="adm-hint">
+          {defaultModel ? `Runtime default: ${defaultModel}. ` : 'List models to discover the runtime default. '}
+          {d.model ? `Selected override: ${d.model}. ` : 'Using the runtime default. '}
+          Codex may return a cached catalog; Test the Coach confirms access to your selection.
         </div>}
       </Step>
 
@@ -255,6 +273,10 @@ export default function AdminCoach() {
           <span className="v">{d.runtime.ok ? <span className="adm-pill ok">ready</span> : <span className="adm-pill bad">missing</span>}{d.runtime.version ? <div className="dim small">{d.runtime.version}</div> : null}{!d.runtime.ok && d.runtime.error ? <div className="small" style={{ color: 'var(--red)' }}>{d.runtime.error}</div> : null}</span>
         </div>
       </Step>
+
+      {/* ---------- access ---------- */}
+      {d.authMode === 'instance' && authState === 'connected' && d.provider !== 'fixture' &&
+        <CredentialAccess key={`${d.provider}:${d.credentialAccess?.revision}`} data={d} onSaved={load} />}
 
       {/* ---------- advanced ---------- */}
       <details className="adm-fold">
@@ -285,10 +307,10 @@ export default function AdminCoach() {
           <div className="adm-hint">{d.authMode === 'profile'
             ? 'Each profile signs in with their own account.'
             : d.auth?.type === 'apikey' || meta.http
-              ? 'One API key for the whole instance: every profile may use the Coach with it, and the daily limits above are what bound the spend.'
+              ? 'Requests use the stored API key. Coach access controls which users may use it; the daily limits above still apply.'
               : d.boundUid
-                ? 'One personal account, already in use by one profile. Every other profile is refused, so nobody spends somebody else\'s subscription.'
-                : 'One personal account. The first profile to use it becomes the only one allowed to — every other profile is then refused. Paste an API key instead if the whole instance should have the Coach.'}</div>
+                ? 'Requests use the connected owner\'s subscription. The owner can grant selected users access in Coach access. Credentials remain on the server.'
+                : 'One personal account. Test the Coach to bind its owner before granting selected users access.'}</div>
 
           <div className="adm-group-t" style={{ marginTop: 14 }}>Isolation</div>
           <div className="adm-hint">{d.unprivileged && !d.unprivileged.ok
@@ -333,6 +355,54 @@ export default function AdminCoach() {
 
 /* ---------------------------------- pieces ---------------------------------- */
 
+export function CredentialAccess({ data, onSaved }) {
+  const [users, setUsers] = useState(null)
+  const [selected, setSelected] = useState([])
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const owner = data.credentialAccess?.ownerUid || data.boundUid
+  const canManage = data.canManageAccess !== false
+  useEffect(() => {
+    let active = true
+    if (canManage) api('/api/admin/users').then(r => {
+      if (!active) return
+      const list = (r.users || []).map(u => ({ id: u.id, name: u.name }))
+      setUsers(list)
+      setSelected(data.credentialAccess?.selectedOnly ? data.credentialAccess.uids || []
+        : owner ? [] : list.map(u => u.id))
+    }).catch(() => { if (active) setError('Could not load users. Refresh to try again.') })
+    return () => { active = false }
+  }, [])
+  const save = async () => {
+    setSaving(true); setError('')
+    try {
+      await api('/api/admin/coach/access', { method: 'POST', body: JSON.stringify({
+        provider: data.provider, revision: data.credentialAccess?.revision,
+        uids: selected.filter(id => id !== owner)
+      }) })
+      await onSaved()
+    } catch (e) { setError(e.message || 'Could not save access.') }
+    finally { setSaving(false) }
+  }
+  return <details className="adm-fold">
+    <summary>Coach access <Icon name="chevronRight" className="chev" /></summary>
+    <div className="adm-fold-b">
+      <div className="adm-hint">Choose who can use the stored credentials. This shares Coach usage, not credentials or admin permissions. Usage counts against the connected account and the existing daily limits.</div>
+      {!canManage ? <div className="adm-hint">Only the connected credential owner can change this list.</div> : <>
+        {!users && !error && <div className="dim small">Loading users…</div>}
+        {users?.map(user => <label key={user.id} className="row" style={{ gap: 10, margin: '10px 0' }}>
+          <input type="checkbox" checked={user.id === owner || selected.includes(user.id)} disabled={saving || user.id === owner}
+            onChange={e => setSelected(ids => e.target.checked ? [...ids, user.id] : ids.filter(id => id !== user.id))} />
+          <span>{user.name || 'Unnamed user'}{user.id === owner ? ' (credential owner)' : ''}<span className="dim small" style={{ display: 'block' }}>{user.id}</span></span>
+        </label>)}
+        <Button size="sm" disabled={saving || !users} onClick={save}>{saving ? 'Saving…' : 'Save access'}</Button>
+      </>}
+      {error && <div role="alert" className="adm-hint" style={{ color: 'var(--red)' }}>{error}</div>}
+      <div className="adm-hint" style={{ marginTop: 10 }}>The credential owner keeps access. Unselected users cannot start new requests; queued requests and retries are rechecked. A request already running may finish. Reconnecting credentials resets this list.</div>
+    </div>
+  </details>
+}
+
 function Step({ n, title, hint, done, open, forceOpen, children }) {
   // `key` remounts the <details> when the wizard advances, so the next step unfolds itself.
   return <details className={'adm-step ' + (done ? 'done' : 'todo')} open={open || forceOpen}>
@@ -351,6 +421,7 @@ function CredentialPill({ auth }) {
   if (s === 'not-required') return <span className="adm-pill">not needed</span>
   if (s === 'optional') return <span className="adm-pill">optional — none saved</span>
   if (s === 'unreadable') return <span className="adm-pill bad">can't be read</span>
+  if (s === 'reconnect') return <span className="adm-pill bad">reconnect required</span>
   return <span className="adm-pill warn">needed</span>
 }
 
@@ -360,12 +431,69 @@ const credentialHint = (auth, meta) => {
   if (s === 'not-required') return 'Not needed'
   if (s === 'optional') return 'Optional for this endpoint'
   if (s === 'unreadable') return 'Stored key can\'t be read — add it again'
+  if (s === 'reconnect') return 'Subscription login needs reconnecting'
+  if (meta.deviceLogin) return 'ChatGPT subscription or API key'
   return meta.setupToken ? 'Token or API key needed' : 'API key needed'
 }
 
 const credentialLabel = type => ({
   'cli-token': 'Claude Code setup token', 'chatgpt-cli': 'ChatGPT CLI login', oauth: 'legacy token', apikey: 'API key'
 }[type] || 'credential')
+
+export function CodexLogin({ onDone, onBusyChange, reconnect }) {
+  const [login, setLogin] = useState({ state: 'none' })
+  const [error, setError] = useState('')
+  const [working, setWorking] = useState(false)
+  const control = useRef({ working: false, generation: 0, state: 'none' })
+  const onDoneRef = useRef(onDone)
+  onDoneRef.current = onDone
+  useEffect(() => {
+    onBusyChange?.(working || login.state === 'pending' || login.state === 'busy')
+    return () => onBusyChange?.(false)
+  }, [working, login.state, onBusyChange])
+  useEffect(() => {
+    let active = true
+    let polling = false
+    const poll = async () => {
+      if (polling || control.current.working) return
+      polling = true
+      const generation = control.current.generation
+      try {
+        const r = await api('/api/admin/coach/codex/login')
+        if (!active || generation !== control.current.generation) return
+        const completed = r.state === 'connected' && control.current.state !== 'connected'
+        control.current.state = r.state
+        setLogin(r); setError('')
+        if (completed) onDoneRef.current()
+      } catch { if (active && generation === control.current.generation) setError('Could not read sign-in status.') }
+      finally { polling = false }
+    }
+    poll()
+    const timer = setInterval(poll, 2000)
+    return () => { active = false; clearInterval(timer) }
+  }, [])
+  const action = async path => {
+    control.current.working = true; control.current.generation++
+    setWorking(true); setError('')
+    try {
+      if (reconnect && path === 'login') await api('/api/admin/coach/disconnect', { method: 'POST', body: JSON.stringify({ provider: 'codex' }) })
+      setLogin(await api('/api/admin/coach/codex/' + path, { method: 'POST', body: '{}' }))
+    } catch (e) { setError(e.message || 'Sign-in could not be completed.') }
+    finally { control.current.working = false; setWorking(false) }
+  }
+  return <div className="adm-hint">
+    <p>Sign in with your ChatGPT subscription. This connection belongs to your current profile. Device login may need enabling in your OpenAI account settings.</p>
+    {login.state === 'pending' ? <>
+      {login.verificationUrl && <p>Open <a href={login.verificationUrl} target="_blank" rel="noopener noreferrer">OpenAI sign-in</a> and enter <b>{login.userCode}</b>. Complete only the sign-in you started here. Expires at {new Date(login.expiresAt).toLocaleTimeString()}.</p>}
+      {!login.userCode && <p>Waiting for OpenAI's device code…</p>}
+      <Button size="sm" disabled={working} onClick={() => action('cancel')}>Cancel sign-in</Button>
+    </> : <>
+      {login.state === 'busy' ? <p>Another admin has a pending sign-in.</p> : <Button size="sm" disabled={working} onClick={() => action('login')}>{reconnect ? 'Reconnect ChatGPT subscription' : 'Sign in with ChatGPT'}</Button>}
+      {['cancelled', 'expired', 'failed'].includes(login.state) && <p>Sign-in {login.state}. You can start again.</p>}
+    </>}
+    {error && <p style={{ color: 'var(--red)' }}>{error}</p>}
+  </div>
+}
 
 // The failure classes jobs.js emits, in words an operator can act on.
 const failureTitle = cls => ({
