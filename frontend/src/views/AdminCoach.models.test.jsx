@@ -21,6 +21,7 @@ vi.mock('../store/useStore.js', () => {
   const useStore = fn => fn(state); useStore.getState = () => state
   return { useStore }
 })
+vi.mock('../sheets.jsx', () => ({ confirmSheet: async options => options.onConfirm() }))
 vi.mock('../store/useUI.js', () => ({ useUI: fn => fn({ toast: vi.fn(), openSheet: vi.fn() }) }))
 const { default: AdminCoach } = await import('./AdminCoach.jsx')
 let host, root
