@@ -1,0 +1,104 @@
+name: Build Coach validation images
+
+on:
+  push:
+    branches: [feature/codex-subscription]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize validation image builds; this workflow never deploys a stack.
+concurrency:
+  group: coach-validation-images
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/test.yml
+
+  build:
+    needs: tests
+    if: github.repository == 'adamprescott/openGym' && github.ref == 'refs/heads/feature/codex-subscription'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      api_image: ${{ steps.meta.outputs.api_image }}
+      web_image: ${{ steps.meta.outputs.web_image }}
+      api_digest: ${{ steps.api.outputs.digest }}
+      web_digest: ${{ steps.web.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set image metadata
+        id: meta
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          API_TARGET: coach
+        run: |
+          case "$API_TARGET" in default|coach) ;; *) echo 'Invalid OPENGYM_API_TARGET'; exit 1 ;; esac
+          owner="${REPOSITORY_OWNER,,}"
+          echo "tag=coach-test-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "api_image=ghcr.io/${owner}/opengym-api" >> "$GITHUB_OUTPUT"
+          echo "web_image=ghcr.io/${owner}/opengym-web" >> "$GITHUB_OUTPUT"
+          echo "target=${API_TARGET}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4
+        if: contains(vars.OPENGYM_PLATFORMS, 'arm64')
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish API
+        id: api
+        uses: docker/build-push-action@v7
+        with:
+          context: ./api
+          file: ./api/Dockerfile
+          target: ${{ steps.meta.outputs.target }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.api_image }}:${{ steps.meta.outputs.tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=api-${{ steps.meta.outputs.target }}
+          cache-to: type=gha,mode=max,scope=api-${{ steps.meta.outputs.target }}
+      - name: Publish web
+        id: web
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./web/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.web_image }}:${{ steps.meta.outputs.tag }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.tag }}
+            VCS_REF=${{ github.sha }}
+            APP_BUILD=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+      - name: Bootstrap image references
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          API_IMAGE: ${{ steps.meta.outputs.api_image }}
+          WEB_IMAGE: ${{ steps.meta.outputs.web_image }}
+        run: |
+          echo "Published ${API_IMAGE}:${TAG} and ${WEB_IMAGE}:${TAG}."
+
