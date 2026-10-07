@@ -228,8 +228,6 @@ export default function AdminCoach() {
       </Step>}
 
       {/* ---------- model ---------- */}
-      {d.authMode === 'instance' && authState === 'connected' && d.provider !== 'fixture' &&
-        <CredentialAccess key={`${d.provider}:${d.credentialAccess?.revision}`} data={d} onSaved={load} />}
       <Step n={num()} title="Model" hint={d.model || (defaultModel ? 'default: ' + defaultModel : 'runtime default')} done={step4Done} {...stepAt()}>
         <div className="adm-hint">{meta.http
           ? 'Which model the provider should use. "List models" asks the provider for its current list, so nothing here goes stale.'
@@ -275,6 +273,10 @@ export default function AdminCoach() {
           <span className="v">{d.runtime.ok ? <span className="adm-pill ok">ready</span> : <span className="adm-pill bad">missing</span>}{d.runtime.version ? <div className="dim small">{d.runtime.version}</div> : null}{!d.runtime.ok && d.runtime.error ? <div className="small" style={{ color: 'var(--red)' }}>{d.runtime.error}</div> : null}</span>
         </div>
       </Step>
+
+      {/* ---------- access ---------- */}
+      {d.authMode === 'instance' && authState === 'connected' && d.provider !== 'fixture' &&
+        <CredentialAccess key={`${d.provider}:${d.credentialAccess?.revision}`} data={d} onSaved={load} />}
 
       {/* ---------- advanced ---------- */}
       <details className="adm-fold">
