@@ -1,9 +1,19 @@
 # Codex Coach with a ChatGPT subscription
 
 The Codex runtime supports an API key or one owner's cached ChatGPT sign-in. The
-subscription connection is explicitly bound to the openGym profile that completes
-device sign-in. Other profiles cannot use it, including through scheduled jobs or
-admin testing. Per-profile subscription accounts are not supported in this version.
+subscription connection retains the openGym profile that completes device sign-in as
+its owner. By default, only that profile may use it. The owner can grant selected users
+access under **Admin → AI Coach → Coach access**. Per-profile subscription accounts are
+not supported in this version.
+
+Check the users who may use the stored credential and choose **Save access**. This grants
+Coach usage only: credentials remain on the server, admin permissions do not change, and
+the existing per-user and instance daily limits still apply. The owner retains access and
+exclusive control of the subscription connection and its access list. Revocation blocks
+new requests, queued work and repair/retry calls; a model request already running may finish.
+Deleting a selected profile revokes its grant; deleting the owner removes all delegated
+grants. Reconnecting credentials resets the list. API keys preserve their existing shared
+default until an admin saves a selected-user list.
 
 ## Build and storage
 
@@ -39,7 +49,7 @@ output, or deployment-specific configuration to public issues.
 The catalog may be cached by Codex and does not guarantee access to every listed model.
 If Codex does not identify a default, the UI says so rather than guessing. Listing uses
 the requesting admin's connection permission and the same disconnect/revision guards as
-inference; another admin cannot use the owner's subscription to refresh the catalog.
+inference; an admin without an explicit grant cannot use the owner's subscription.
 
 Login runs as `coach`, in a private temporary credential directory. Only a successful
 ChatGPT login status promotes the cache to the persistent home and saves the owner

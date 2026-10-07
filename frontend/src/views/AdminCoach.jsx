@@ -51,7 +51,7 @@ export default function AdminCoach() {
   // who has just switched the Coach on and connected it finds no Coach anywhere until a reload,
   // which reads as a setup that failed (Discord #install-help, 2026-09-19).
   const load = () => api('/api/admin/coach').then(r => {
-    const context = JSON.stringify([r.provider, r.authMode, r.boundUid, r.auth?.state, r.auth?.connectedAt])
+    const context = JSON.stringify([r.provider, r.authMode, r.boundUid, r.auth?.state, r.auth?.connectedAt, r.credentialAccess?.revision])
     if (context !== modelContext.current) { setModels(r.knownModels || null); setRuntimeDefault(null) }
     else if (r.knownModels) setModels(r.knownModels)
     modelContext.current = context
@@ -228,6 +228,8 @@ export default function AdminCoach() {
       </Step>}
 
       {/* ---------- model ---------- */}
+      {d.authMode === 'instance' && authState === 'connected' && d.provider !== 'fixture' &&
+        <CredentialAccess key={`${d.provider}:${d.credentialAccess?.revision}`} data={d} onSaved={load} />}
       <Step n={num()} title="Model" hint={d.model || (defaultModel ? 'default: ' + defaultModel : 'runtime default')} done={step4Done} {...stepAt()}>
         <div className="adm-hint">{meta.http
           ? 'Which model the provider should use. "List models" asks the provider for its current list, so nothing here goes stale.'
@@ -303,10 +305,10 @@ export default function AdminCoach() {
           <div className="adm-hint">{d.authMode === 'profile'
             ? 'Each profile signs in with their own account.'
             : d.auth?.type === 'apikey' || meta.http
-              ? 'One API key for the whole instance: every profile may use the Coach with it, and the daily limits above are what bound the spend.'
+              ? 'Requests use the stored API key. Coach access controls which users may use it; the daily limits above still apply.'
               : d.boundUid
-                ? 'One personal account, already in use by one profile. Every other profile is refused, so nobody spends somebody else\'s subscription.'
-                : 'One personal account. The first profile to use it becomes the only one allowed to — every other profile is then refused. Paste an API key instead if the whole instance should have the Coach.'}</div>
+                ? 'Requests use the connected owner\'s subscription. The owner can grant selected users access in Coach access. Credentials remain on the server.'
+                : 'One personal account. Test the Coach to bind its owner before granting selected users access.'}</div>
 
           <div className="adm-group-t" style={{ marginTop: 14 }}>Isolation</div>
           <div className="adm-hint">{d.unprivileged && !d.unprivileged.ok
@@ -350,6 +352,54 @@ export default function AdminCoach() {
 }
 
 /* ---------------------------------- pieces ---------------------------------- */
+
+export function CredentialAccess({ data, onSaved }) {
+  const [users, setUsers] = useState(null)
+  const [selected, setSelected] = useState([])
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const owner = data.credentialAccess?.ownerUid || data.boundUid
+  const canManage = data.canManageAccess !== false
+  useEffect(() => {
+    let active = true
+    if (canManage) api('/api/admin/users').then(r => {
+      if (!active) return
+      const list = (r.users || []).map(u => ({ id: u.id, name: u.name }))
+      setUsers(list)
+      setSelected(data.credentialAccess?.selectedOnly ? data.credentialAccess.uids || []
+        : owner ? [] : list.map(u => u.id))
+    }).catch(() => { if (active) setError('Could not load users. Refresh to try again.') })
+    return () => { active = false }
+  }, [])
+  const save = async () => {
+    setSaving(true); setError('')
+    try {
+      await api('/api/admin/coach/access', { method: 'POST', body: JSON.stringify({
+        provider: data.provider, revision: data.credentialAccess?.revision,
+        uids: selected.filter(id => id !== owner)
+      }) })
+      await onSaved()
+    } catch (e) { setError(e.message || 'Could not save access.') }
+    finally { setSaving(false) }
+  }
+  return <details className="adm-fold">
+    <summary>Coach access <Icon name="chevronRight" className="chev" /></summary>
+    <div className="adm-fold-b">
+      <div className="adm-hint">Choose who can use the stored credentials. This shares Coach usage, not credentials or admin permissions. Usage counts against the connected account and the existing daily limits.</div>
+      {!canManage ? <div className="adm-hint">Only the connected credential owner can change this list.</div> : <>
+        {!users && !error && <div className="dim small">Loading users…</div>}
+        {users?.map(user => <label key={user.id} className="row" style={{ gap: 10, margin: '10px 0' }}>
+          <input type="checkbox" checked={user.id === owner || selected.includes(user.id)} disabled={saving || user.id === owner}
+            onChange={e => setSelected(ids => e.target.checked ? [...ids, user.id] : ids.filter(id => id !== user.id))} />
+          <span>{user.name || 'Unnamed user'}{user.id === owner ? ' (credential owner)' : ''}<span className="dim small" style={{ display: 'block' }}>{user.id}</span></span>
+        </label>)}
+        <Button size="sm" disabled={saving || !users} onClick={save}>{saving ? 'Saving…' : 'Save access'}</Button>
+      </>}
+      {error && <div role="alert" className="adm-hint" style={{ color: 'var(--red)' }}>{error}</div>}
+      <div className="adm-hint" style={{ marginTop: 10 }}>The credential owner keeps access. Unselected users cannot start new requests; queued requests and retries are rechecked. A request already running may finish. Reconnecting credentials resets this list.</div>
+    </div>
+  </details>
+}
 
 function Step({ n, title, hint, done, open, forceOpen, children }) {
   // `key` remounts the <details> when the wizard advances, so the next step unfolds itself.

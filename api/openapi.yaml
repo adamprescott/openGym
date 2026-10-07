@@ -2591,8 +2591,8 @@ paths:
       description: >-
         Its own route because both the Coach screen and the admin card have to state it,
         and neither should be inferring it from settings. In instance mode a personal
-        credential binds to the first profile that spends it; every other profile is
-        refused outright rather than warned, and `reason` says so.
+        credential retains an owner. Other profiles need an explicit grant in Coach access;
+        refused profiles receive a `reason` and message.
       responses:
         '200':
           description: The account this profile's jobs would run on.
@@ -2717,6 +2717,40 @@ paths:
               example: { error: "unknown provider" }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/admin/coach/access:
+    post:
+      tags: [admin, coach]
+      operationId: postAdminCoachAccess
+      summary: 'Admin: choose users allowed to use the stored Coach credential'
+      description: >-
+        Requires instance credentials and, for an owner-bound credential, the owner admin.
+        The owner always retains access. A successful write invalidates queued connection
+        revisions; running requests may finish. Reconnecting resets access to defaults.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, revision, uids]
+              properties:
+                provider: { type: string }
+                revision: { type: string, description: Opaque revision from the admin Coach response. }
+                uids:
+                  type: array
+                  maxItems: 1000
+                  items: { type: string }
+      responses:
+        '200':
+          description: Access updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ok' }
+        '400': { description: Invalid or nonexistent users. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: Connection changed or no shareable stored credential. }
 
   /api/admin/coach/test:
     post:
@@ -3746,6 +3780,16 @@ components:
       type: object
       description: The whole admin card in one answer. Never a credential — only whether one is filed.
       properties:
+        canManageAccess: { type: boolean }
+        credentialAccess:
+          type: object
+          properties:
+            selectedOnly: { type: boolean }
+            uids:
+              type: array
+              items: { type: string }
+            ownerUid: { type: [string, 'null'] }
+            revision: { type: string }
         disabledByEnv: { type: boolean, description: "COACH_DISABLED is set, so nothing the admin toggles matters." }
         enabled: { type: boolean }
         provider: { type: string }

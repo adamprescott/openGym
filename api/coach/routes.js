@@ -27,7 +27,7 @@ const USER_ERROR = {
 };
 const HTTP_FOR = { off: 503, busy: 409, cap: 429, consent: 403, shared: 409, unprivileged: 503 };
 
-export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
+export function coachRoutes({ json, readBody, readSession, requireAdmin, listUsers = () => [] }) {
   /** Every user route starts the same way: signed in, feature on, feature reachable. */
   const guard = (req, res) => {
     const user = readSession(req);
@@ -171,6 +171,8 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
         maxMessageLen: cfg.maxMessageLen,
         community: !!cfg.community,
         runtime: { ok: !!check.ok, version: check.version || null, error: check.error || null, needsKey: !!check.needsKey },
+        credentialAccess: { ...cfgStore.accessFor(cfg), revision: cfgStore.accessRevision(readSession(req)?.id, cfg) },
+        canManageAccess: !cfgStore.boundUidFor(cfg) || cfgStore.boundUidFor(cfg) === readSession(req)?.id,
         authMode: cfg.authMode,
         boundUid: cfgStore.boundUidFor(cfg),
         /* Whether a credential is filed, and whose — never the credential. `unreadable` is its
@@ -246,6 +248,24 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
         );
       }
       cfgStore.save(patch);
+      json(res, 200, { ok: true });
+    },
+
+    'POST /api/admin/coach/access': async (req, res) => {
+      if (!requireAdmin(req, res)) return;
+      const body = await readBody(req);
+      if (!requireAdmin(req, res)) return;
+      const cfg = cfgStore.load(), uid = readSession(req)?.id;
+      if (cfg.authMode !== 'instance' || !cfgStore.authFor(cfg)) return json(res, 409, { error: 'Connect a stored instance credential first.' });
+      const owner = cfgStore.boundUidFor(cfg);
+      if (owner && owner !== uid) return json(res, 403, { error: 'Only the credential owner can change access.' });
+      if (!owner && cfgStore.isPersonalCredential(cfgStore.authFor(cfg)?.type)) return json(res, 409, { error: 'Test the Coach to establish the credential owner before sharing access.' });
+      // Require the displayed connection version: a stale card cannot grant use of a new account.
+      if (body.provider !== cfg.provider || body.revision !== cfgStore.accessRevision(uid)) return json(res, 409, { error: 'The connection or access settings changed. Refresh and retry.' });
+      if (!Array.isArray(body.uids) || body.uids.length > 1000 || body.uids.some(id => typeof id !== 'string')) return json(res, 400, { error: 'Choose a valid list of users.' });
+      const existing = new Set(listUsers().map(u => u.id));
+      if (body.uids.some(id => !existing.has(id))) return json(res, 400, { error: 'A selected user no longer exists. Refresh and retry.' });
+      cfgStore.setCredentialAccess(cfg.provider, body.uids.filter(id => id !== owner));
       json(res, 200, { ok: true });
     },
 
