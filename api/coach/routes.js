@@ -147,7 +147,7 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin, listUse
         ? cfg.authMode === 'instance' && !!cfgStore.boundUidFor(cfg) && !cfgStore.authFor(cfg).reconnectNeeded && cfgStore.codexCachePresent() && await codexAuth.cachedLoginStatus() : false;
       // For the runtime-backed providers this asks "is the runtime there"; for an HTTPS one it
       // lists the models with the stored key, which is the round trip the card wants anyway.
-      const cred = adapter?.spawns === false ? cfgStore.credentialFor(cfgStore.boundUidFor(cfg)) : undefined;
+      const cred = adapter?.spawns === false ? cfgStore.credentialFor(readSession(req)?.id) : undefined;
       const check = adapter ? await adapter.check(cfg, cfgStore.jobEnv(process.env.TMPDIR || '/tmp', cred?.ok ? cred : undefined)) : { ok: false, error: 'unknown provider' };
       const log = cfg.log || [];
       const today = new Date().toISOString().slice(0, 10);
@@ -283,8 +283,9 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin, listUse
       if (cfg.provider === 'codex') return json(res, 200, await jobs.listRuntimeModels(readSession(req)?.id));
       const adapter = adapterFor(cfg.provider);
       if (!adapter || typeof adapter.models !== 'function') return json(res, 200, { ok: false, error: 'this provider does not list models', models: [] });
-      const cred = cfgStore.credentialFor(cfgStore.boundUidFor(cfg));
-      const env = cfgStore.jobEnv(process.env.TMPDIR || '/tmp', cred.ok ? cred : undefined);
+      const cred = cfgStore.credentialFor(readSession(req)?.id);
+      if (!cred.ok) return json(res, 200, { ok: false, models: [], error: 'This profile cannot list models for the configured account.' });
+      const env = cfgStore.jobEnv(process.env.TMPDIR || '/tmp', cred);
       json(res, 200, await adapter.models(cfg, env));
     },
 
