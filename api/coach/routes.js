@@ -256,10 +256,11 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin }) {
     },
 
     /* The models the configured endpoint serves, so the card can offer a list rather than a
-       text field that goes stale with every model release. HTTPS providers only. */
+       text field that goes stale with every model release. */
     'POST /api/admin/coach/models': async (req, res) => {
       if (!requireAdmin(req, res)) return;
       const cfg = cfgStore.load();
+      if (cfg.provider === 'codex') return json(res, 200, await jobs.listRuntimeModels(readSession(req)?.id));
       const adapter = adapterFor(cfg.provider);
       if (!adapter || typeof adapter.models !== 'function') return json(res, 200, { ok: false, error: 'this provider does not list models', models: [] });
       const cred = cfgStore.credentialFor(cfgStore.boundUidFor(cfg));

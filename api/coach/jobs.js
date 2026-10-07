@@ -452,6 +452,31 @@ function removeJobDir(jobDir, ids) {
   try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch { /* leaked, not fatal */ }
 }
 
+export async function listRuntimeModels(uid) {
+  const cfg = cfgStore.load();
+  const adapter = adapterFor(cfg.provider);
+  const credential = cfgStore.credentialFor(uid);
+  const denied = { ok: false, models: [], defaultModel: null, error: 'This profile cannot list models for the configured account. Enable Coach and check its connection.' };
+  if (!adapter?.models || !credential.ok || !canDropPrivileges().ok) return denied;
+  const revision = cfgStore.credentialRevision(uid);
+  const jobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'coach-models-'));
+  const ids = unprivilegedIds();
+  try {
+    if (ids) shareJobDir(jobDir, ids);
+    // Use the same owner, revision and disconnect guards as inference. Listing can refresh
+    // authentication too; never substitute the connection owner for the requesting admin.
+    const listing = { ...adapter, async invoke(opts) {
+      const catalog = await adapter.models(cfg, opts.env, { jobDir });
+      return { code: catalog.ok ? 0 : 1, text: '', catalog };
+    } };
+    const r = await authorizedAdapter(listing, uid, revision).invoke({ jobDir });
+    if (cfgStore.credentialRevision(uid) !== revision) return denied;
+    return r.code === 0 ? r.catalog : { ...denied, error: 'Could not list models. Check the Coach connection and try again.' };
+  } catch {
+    return { ...denied, error: 'Could not list models. Check the Coach connection and try again.' };
+  } finally { removeJobDir(jobDir, ids); }
+}
+
 export async function testRun(uid) {
   const cfg = cfgStore.load();
   const adapter = adapterFor(cfg.provider);

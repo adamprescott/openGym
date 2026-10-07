@@ -31,9 +31,15 @@ output, or deployment-specific configuration to public issues.
    the one-time code shown only to the initiating admin. Complete only the sign-in
    you started yourself. Device code login may need enabling in your OpenAI account
    or workspace settings.
-4. Once connected, choose a model or leave the runtime default, then run
+4. Once connected, click **List models** to read Codex's model catalog and its reported
+   default. Choose an override or select **Default** to follow the runtime default, then run
    **Test the Coach**. This makes a real model call using the requesting profile's
    account, without workout data.
+
+The catalog may be cached by Codex and does not guarantee access to every listed model.
+If Codex does not identify a default, the UI says so rather than guessing. Listing uses
+the requesting admin's connection permission and the same disconnect/revision guards as
+inference; another admin cannot use the owner's subscription to refresh the catalog.
 
 Login runs as `coach`, in a private temporary credential directory. Only a successful
 ChatGPT login status promotes the cache to the persistent home and saves the owner

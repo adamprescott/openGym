@@ -13,6 +13,7 @@ const auth = await import('../coach/codex-auth.js');
 const { authorizedAdapter } = await import('../coach/authorize.js');
 const { forcePrivilegeVerdict, run } = await import('../coach/adapters/spawn.js');
 const jobs = await import('../coach/jobs.js');
+const { adapterFor } = await import('../coach/adapters/index.js');
 const { coachRoutes } = await import('../coach/routes.js');
 forcePrivilegeVerdict({ ok: true, dropped: false });
 after(() => { auth.setAuthRunnerForTests(null); fs.rmSync(home, { recursive: true, force: true }); });
@@ -20,6 +21,25 @@ after(() => { auth.setAuthRunnerForTests(null); fs.rmSync(home, { recursive: tru
 const fresh = () => config.save({ enabled: true, provider: 'codex', authMode: 'instance', auth: {}, boundUid: {} });
 const cache = () => fs.writeFileSync(path.join(home, 'auth.json'), 'test-only-placeholder', { mode: 0o600 });
 const okStatus = async () => ({ code: 0, stdout: '', stderr: 'Logged in using ChatGPT' });
+
+test('model catalog enforces requester ownership and reserves auth during discovery', async () => {
+  fresh(); cache(); config.saveCodexSubscription('owner'); auth.setAuthRunnerForTests(okStatus);
+  const adapter = adapterFor('codex'), original = adapter.models;
+  let calls = 0;
+  adapter.models = async () => {
+    calls++;
+    assert.equal((await auth.disconnect('owner')).ok, false);
+    return { ok: true, models: ['model-a'], defaultModel: 'model-a' };
+  };
+  try {
+    assert.equal((await jobs.listRuntimeModels('other-admin')).ok, false);
+    assert.equal(calls, 0);
+    assert.deepEqual(await jobs.listRuntimeModels('owner'), { ok: true, models: ['model-a'], defaultModel: 'model-a' });
+    assert.equal(calls, 1);
+    adapter.models = async () => { config.saveCodexSubscription('owner'); return { ok: true, models: ['stale'] }; };
+    assert.equal((await jobs.listRuntimeModels('owner')).ok, false, 'account changes discard stale catalog');
+  } finally { adapter.models = original; }
+});
 const prompt = 'Open https://auth.openai.com/codex/device\nEnter this one-time code (expires in 15 minutes)\n   ABCD-EFGHI\n';
 async function waitFor(state) {
   for (let n = 0; n < 100; n++) {

@@ -5,6 +5,7 @@
  * stop the CLI reaching for state a sandboxed job does not have.
  */
 import { run } from './spawn.js';
+import { discoverModels } from './codex-models.js';
 
 const CLI = 'codex';
 
@@ -35,6 +36,10 @@ export default {
   id: 'codex',
   spawns: true,
   cli: CLI,
+
+  models(cfg, env, options = {}) {
+    return discoverModels({ env, cwd: options.jobDir, timeoutMs: 20000 });
+  },
 
   async check(cfg, env) {
     const r = await run(CLI, ['--version'], { env, timeoutMs: 20000 });

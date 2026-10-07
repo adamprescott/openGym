@@ -40,6 +40,8 @@ export default function AdminCoach() {
   // The models the endpoint serves, fetched on demand. Seeded from the status call when the
   // stored key already let it list them.
   const [models, setModels] = useState(null)
+  const [runtimeDefault, setRuntimeDefault] = useState(null)
+  const modelContext = useRef(null)
   // The last "Test the Coach" outcome, shown inline where the button is rather than only as a
   // toast that is gone before anyone has read the provider's reason.
   const [testResult, setTestResult] = useState(null)
@@ -48,7 +50,13 @@ export default function AdminCoach() {
   // that once per boot, and the Plan tab's Coach card hangs off it: without the re-read, an admin
   // who has just switched the Coach on and connected it finds no Coach anywhere until a reload,
   // which reads as a setup that failed (Discord #install-help, 2026-09-19).
-  const load = () => api('/api/admin/coach').then(r => { setD(r); setModels(r.knownModels || null); useStore.getState().refreshConfig() }).catch(e => toast(e.message || 'Failed to load'))
+  const load = () => api('/api/admin/coach').then(r => {
+    const context = JSON.stringify([r.provider, r.authMode, r.boundUid, r.auth?.state, r.auth?.connectedAt])
+    if (context !== modelContext.current) { setModels(r.knownModels || null); setRuntimeDefault(null) }
+    else if (r.knownModels) setModels(r.knownModels)
+    modelContext.current = context
+    setD(r); useStore.getState().refreshConfig()
+  }).catch(e => toast(e.message || 'Failed to load'))
   useEffect(() => { load() }, [])
 
   const patch = async body => {
@@ -59,11 +67,13 @@ export default function AdminCoach() {
   }
   const loadModels = async () => {
     setBusy(true)
+    const context = modelContext.current
     try {
       const r = await api('/api/admin/coach/models', { method: 'POST', body: '{}' })
-      if (r.ok) { setModels(r.models); toast(r.models.length + ' models') } else toast(r.error || 'Could not list models')
+      if (context !== modelContext.current) return
+      if (r.ok) { setModels(r.models); setRuntimeDefault(r.defaultModel || null); toast(r.models.length + ' models') } else toast(r.error || 'Could not list models')
     } catch (e) { toast(e.message) }
-    setBusy(false)
+    finally { setBusy(false) }
   }
   const test = async () => {
     setBusy(true); setTestResult({ pending: true })
@@ -92,6 +102,7 @@ export default function AdminCoach() {
   </div>
 
   const meta = d.providers.find(p => p.id === d.provider) || {}
+  const defaultModel = runtimeDefault || meta.defaultModel
   const authState = d.auth?.state
   const authed = authState === 'connected' || authState === 'not-required' || authState === 'optional'
   const needsEndpoint = !!meta.baseUrl
@@ -217,24 +228,29 @@ export default function AdminCoach() {
       </Step>}
 
       {/* ---------- model ---------- */}
-      <Step n={num()} title="Model" hint={d.model || (meta.defaultModel ? 'default: ' + meta.defaultModel : 'not chosen yet')} done={step4Done} {...stepAt()}>
+      <Step n={num()} title="Model" hint={d.model || (defaultModel ? 'default: ' + defaultModel : 'runtime default')} done={step4Done} {...stepAt()}>
         <div className="adm-hint">{meta.http
           ? 'Which model the provider should use. "List models" asks the provider for its current list, so nothing here goes stale.'
           : 'Optional. Leave it empty to use the runtime\'s own default.'}</div>
         <div className="adm-field">
           <label>Model</label>
           {models && models.length
-            ? <select className="adm-select" value={models.includes(d.model) ? d.model : ''} disabled={busy} onChange={e => patch({ model: e.target.value })}>
-              <option value="">{meta.defaultModel ? `Default (${meta.defaultModel})` : 'Pick a model…'}</option>
+            ? <select aria-label="Model" className="adm-select" value={d.models?.[d.provider] || ''} disabled={busy} onChange={e => patch({ model: e.target.value })}>
+              <option value="">{defaultModel ? `Default (${defaultModel})` : meta.http ? 'Pick a model…' : 'Runtime default (not reported)'}</option>
               {d.model && !models.includes(d.model) && <option value={d.model}>{d.model} (not in the list)</option>}
               {models.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
-            : <TextField key={d.provider} defaultValue={d.models?.[d.provider] || ''} placeholder={meta.defaultModel ? `Default: ${meta.defaultModel}` : needsEndpoint ? 'e.g. qwen2.5:3b — or press "List models"' : '(runtime default)'}
+            : <TextField key={d.provider} defaultValue={d.models?.[d.provider] || ''} placeholder={defaultModel ? `Default: ${defaultModel}` : needsEndpoint ? 'e.g. qwen2.5:3b — or press "List models"' : '(runtime default)'}
               onBlur={e => e.target.value !== (d.models?.[d.provider] || '') && patch({ model: e.target.value })} />}
         </div>
-        {meta.http && <div className="adm-actions">
+        {(meta.http || d.provider === 'codex') && <div className="adm-actions">
           <Button size="sm" variant="tinted" icon="reset" disabled={busy} onClick={loadModels}>{models ? 'Refresh list' : 'List models'}</Button>
           {models && models.length ? <span className="dim small" style={{ alignSelf: 'center' }}>{models.length} served by the provider</span> : null}
+        </div>}
+        {d.provider === 'codex' && <div className="adm-hint">
+          {defaultModel ? `Runtime default: ${defaultModel}. ` : 'List models to discover the runtime default. '}
+          {d.model ? `Selected override: ${d.model}. ` : 'Using the runtime default. '}
+          Codex may return a cached catalog; Test the Coach confirms access to your selection.
         </div>}
       </Step>
 

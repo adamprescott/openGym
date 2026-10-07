@@ -2759,7 +2759,9 @@ paths:
       summary: 'Admin: list the models the endpoint serves'
       description: >-
         So the card can offer a list rather than a text field that goes stale with every
-        model release. HTTPS providers only; a provider that cannot be asked answers
+        model release. Supports HTTPS providers and the Codex runtime catalog. Codex
+        requires the requesting admin to have access to the configured credential;
+        it returns the runtime default when reported. A provider that cannot be asked answers
         `ok: false` with an empty list rather than an error status.
       responses:
         '200':
@@ -2773,6 +2775,7 @@ paths:
                   models:
                     type: array
                     items: { type: string }
+                  defaultModel: { type: [string, 'null'], description: Runtime-reported default when available; not an entitlement guarantee. }
                   error: { type: string }
               example: { ok: true, models: [qwen3.8-27b, gpt-oss-120b] }
         '401': { $ref: '#/components/responses/Unauthorized' }
