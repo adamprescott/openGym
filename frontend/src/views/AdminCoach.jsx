@@ -4,6 +4,7 @@ import { useStore } from '../store/useStore.js'
 import { api } from '../lib/api.js'
 import Icon from '../components/Icon.jsx'
 import { Button, Switch, TextField } from '../components/ui.jsx'
+import { confirmSheet } from '../sheets.jsx'
 
 /* The operator's side of the Coach, laid out as a guided setup: one master switch, numbered
    steps that each say what they are for, and everything an owner rarely needs folded away
@@ -87,6 +88,14 @@ export default function AdminCoach() {
     } catch (e) { setTestResult({ ok: false, error: e.message }); toast(e.message) }
     setBusy(false)
   }
+  // A number input hands back "" for anything it cannot parse, and +"" is 0, which the hint on
+  // this card calls "no limit". So an admin who cleared the box to retype and clicked elsewhere
+  // had just uncapped daily spend on their API key, silently. An empty box is no change now: the
+  // stored value goes back into it and nothing is written. Removing the cap takes typing a 0.
+  const capBlur = key => e => {
+    if (e.target.value.trim() === '') { e.target.value = d.caps[key]; return }
+    if (+e.target.value !== d.caps[key]) patch({ caps: { ...d.caps, [key]: +e.target.value } })
+  }
   const disconnect = async () => {
     setBusy(true)
     try { await api('/api/admin/coach/disconnect', { method: 'POST', body: JSON.stringify({ provider: d.provider }) }); toast('Credential removed'); await load() }
@@ -109,21 +118,25 @@ export default function AdminCoach() {
   const hasEndpoint = !needsEndpoint || !!d.baseUrl
   const live = d.enabled && d.runtime.ok && authed && hasEndpoint
 
-  const status = !d.enabled ? 'Off — users see no Coach anywhere in the app.'
+  const status = !d.enabled ? 'Off. Users won’t see the Coach anywhere in the app.'
     : live ? <>On · {meta.label}{d.model ? ' · ' + d.model : ''}</>
-      : !hasEndpoint ? 'On, but no endpoint yet — finish step 2.'
-        : !authed ? 'On, but no credential yet — finish the Credential step.'
-          : !d.runtime.ok ? 'On, but the provider cannot be reached — see the Test step.'
+      : !hasEndpoint ? 'On, but no endpoint yet. Finish step 2.'
+        : !authed ? 'On, but no credential yet. Finish the Credential step.'
+          : !d.runtime.ok ? 'On, but the provider can’t be reached. See the Test step.'
             : 'On'
 
   // Chips, grouped.
   const groups = [
-    { title: 'Paste an API key', hint: 'Plain HTTPS to the provider. Works on the default api image — nothing extra to install.', items: d.providers.filter(p => p.http) },
+    { title: 'Paste an API key', hint: 'Plain HTTPS to the provider. Works on the default api image, nothing extra to install.', items: d.providers.filter(p => p.http) },
     { title: 'Runs a local AI runtime', hint: 'Needs the bigger api image built with --target coach.', items: d.providers.filter(p => RUNTIME_IDS.includes(p.id)) },
     { title: 'Testing', hint: 'A built-in fake that answers instantly, so the whole loop can be tried without an account.', items: d.providers.filter(p => TESTING_IDS.includes(p.id)) }
   ]
 
   const hasCredentialStep = !!(meta.setupToken || meta.apiKey)
+  // The model this provider was explicitly GIVEN — as opposed to `d.model`, which falls back to
+  // the provider's own default. Both halves of the Model step (the dropdown and the free-text
+  // box) read this one value, so they cannot disagree about what is configured.
+  const chosenModel = d.models?.[d.provider] || ''
   const step1Done = !!d.provider
   const step2Done = hasEndpoint
   const step3Done = authed
@@ -144,9 +157,9 @@ export default function AdminCoach() {
     <div className="adm-hero">
       <div className="adm-hero-av"><Icon name="sparkles" /></div>
       <h2>AI Coach</h2>
-      <p>An optional coach that designs training plans and reviews what people actually log. Off right now — nobody sees it anywhere in the app.</p>
+      <p>An optional coach that designs training plans and reviews what people actually log. Off right now, so nobody sees it anywhere in the app.</p>
       <div className="adm-hero-feats">
-        <div><Icon name="clipboard" /><span><b>Bring any AI.</b> An API key from Anthropic, OpenAI or Gemini — or a free local model via Ollama.</span></div>
+        <div><Icon name="key" /><span><b>Bring any AI.</b> An API key from Anthropic, OpenAI or Gemini, or a free local model via Ollama.</span></div>
         <div><Icon name="shield" /><span><b>Private by design.</b> A strict allowlist decides what leaves; every change needs the user's yes and can be undone.</span></div>
         <div><Icon name="person" /><span><b>Each user decides.</b> Turning it on only makes the Coach available; every person consents for themselves.</span></div>
       </div>
@@ -166,7 +179,7 @@ export default function AdminCoach() {
     {!live && <div className="adm-progress" aria-hidden="true"><i style={{ width: Math.round(doneCount / flags.length * 100) + '%' }} /></div>}
     <div className="adm-lead">
       {live ? 'Users find the Coach under Plan → Coach. This switch is the only place it can be turned off for everyone.'
-        : `${doneCount} of ${flags.length} steps done — finish the open step and the next one unfolds.`}
+        : `${doneCount} of ${flags.length} steps done. Finish the open step and the next one unfolds.`}
     </div>
 
     {d.enabled && <>
@@ -187,7 +200,7 @@ export default function AdminCoach() {
 
       {/* ---------- endpoint (compatible only) ---------- */}
       {needsEndpoint && <Step n={num()} title="Endpoint" hint={d.baseUrl || 'Where the model runs'} done={step2Done} {...stepAt()}>
-        <div className="adm-hint">The address of any server that speaks OpenAI's chat API: <b>Ollama</b>, <b>LM Studio</b>, <b>vLLM</b>, <b>OpenRouter</b>, or a gateway of your own. Just the base — no <code>/v1</code>, no key in the URL.</div>
+        <div className="adm-hint">The address of any server that speaks OpenAI's chat API: <b>Ollama</b>, <b>LM Studio</b>, <b>vLLM</b>, <b>OpenRouter</b>, or a gateway of your own. Just the base: no <code>/v1</code>, no key in the URL.</div>
         <div className="adm-field">
           <label>Base URL</label>
           <TextField key={d.baseUrl || ''} defaultValue={d.baseUrl || ''} placeholder="http://ollama:11434  or  https://openrouter.ai/api" inputMode="url" autoCapitalize="none" autoCorrect="off"
@@ -202,11 +215,18 @@ export default function AdminCoach() {
           <CredentialPill auth={d.auth} />
         </div>
         {authState === 'connected' ? <>
-          <div className="adm-hint">Connected{d.auth.account ? ' as ' + d.auth.account : ''} via {credentialLabel(d.auth.type)}{d.auth.connectedAt ? ' · added ' + rel(d.auth.connectedAt) : ''}. {d.auth.type === 'chatgpt-cli' ? 'Only the profile that completed sign-in can spend this subscription. Codex manages the private login cache.' : 'The key is stored encrypted and is never shown again.'}</div>
+          <div className="adm-hint">Connected{d.auth.account ? ' as ' + d.auth.account : ''} via {credentialLabel(d.auth.type)}{d.auth.connectedAt ? ' · added ' + rel(d.auth.connectedAt) : ''}. {d.auth.type === 'chatgpt-cli' ? 'The credential owner can grant selected users access in Coach access. Codex manages the private login cache.' : 'The key is stored encrypted and is never shown again.'}</div>
           <div className="adm-actions">
             {meta.apiKey && d.auth.type !== 'chatgpt-cli' && <Button size="sm" variant="tinted" icon="lock" disabled={busy}
               onClick={() => openSheet(close => <ApiKeySheet close={close} onDone={load} label={meta.label} placeholder={meta.keyPlaceholder} optional={meta.keyOptional} />)}>Replace key</Button>}
-            <Button size="sm" danger disabled={busy} onClick={disconnect}>Remove</Button>
+            {/* The key is encrypted at rest and never shown again, so this is the one action on the
+                card that cannot be walked back. Every other irreversible action in the app asks first;
+                until 2026-09-22 this one did not. */}
+            <Button size="sm" danger disabled={busy} onClick={() => confirmSheet({
+              title: 'Remove this credential?',
+              message: 'The Coach stops working for everyone on this instance until a new key is added. The stored key cannot be recovered.',
+              confirmText: 'Remove', danger: true, onConfirm: disconnect,
+            })}>Remove</Button>
           </div>
         </> : <>
           {meta.deviceLogin && <CodexLogin onDone={load} onBusyChange={setDeviceBusy} reconnect={authState === 'reconnect'} />}
@@ -235,13 +255,13 @@ export default function AdminCoach() {
         <div className="adm-field">
           <label>Model</label>
           {models && models.length
-            ? <select aria-label="Model" className="adm-select" value={d.models?.[d.provider] || ''} disabled={busy} onChange={e => patch({ model: e.target.value })}>
+            ? <select aria-label="Model" className="adm-select" value={chosenModel} disabled={busy} onChange={e => patch({ model: e.target.value })}>
               <option value="">{defaultModel ? `Default (${defaultModel})` : meta.http ? 'Pick a model…' : 'Runtime default (not reported)'}</option>
-              {d.model && !models.includes(d.model) && <option value={d.model}>{d.model} (not in the list)</option>}
+              {chosenModel && !models.includes(chosenModel) && <option value={chosenModel}>{chosenModel} (not in the list)</option>}
               {models.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
-            : <TextField key={d.provider} defaultValue={d.models?.[d.provider] || ''} placeholder={defaultModel ? `Default: ${defaultModel}` : needsEndpoint ? 'e.g. qwen2.5:3b — or press "List models"' : '(runtime default)'}
-              onBlur={e => e.target.value !== (d.models?.[d.provider] || '') && patch({ model: e.target.value })} />}
+            : <TextField key={d.provider} defaultValue={chosenModel} placeholder={defaultModel ? `Default: ${defaultModel}` : needsEndpoint ? 'e.g. qwen2.5:3b — or press "List models"' : '(runtime default)'}
+              onBlur={e => e.target.value !== chosenModel && patch({ model: e.target.value })} />}
         </div>
         {(meta.http || d.provider === 'codex') && <div className="adm-actions">
           <Button size="sm" variant="tinted" icon="reset" disabled={busy} onClick={loadModels}>{models ? 'Refresh list' : 'List models'}</Button>
@@ -286,10 +306,10 @@ export default function AdminCoach() {
           <div className="adm-hint">How many Coach runs are allowed per day. Every run is one request on the provider account above. 0 means no limit.</div>
           <div className="adm-kv"><span className="k">Per user, per day</span>
             <span className="v"><input className="num" type="number" min="0" max="200" defaultValue={d.caps.perProfileDaily} disabled={busy}
-              onBlur={e => +e.target.value !== d.caps.perProfileDaily && patch({ caps: { ...d.caps, perProfileDaily: +e.target.value } })} /></span></div>
+              onBlur={capBlur('perProfileDaily')} /></span></div>
           <div className="adm-kv"><span className="k">Whole instance, per day</span>
             <span className="v"><input className="num" type="number" min="0" max="5000" defaultValue={d.caps.instanceDaily} disabled={busy}
-              onBlur={e => +e.target.value !== d.caps.instanceDaily && patch({ caps: { ...d.caps, instanceDaily: +e.target.value } })} /></span></div>
+              onBlur={capBlur('instanceDaily')} /></span></div>
           <div className="adm-hint" style={{ marginTop: 10 }}>How long a chat message, refinement or review note can be. The chat composer and the server both enforce this.</div>
           <div className="adm-kv"><span className="k">Max message length</span>
             <span className="v"><input className="num" type="number" min="200" max="4000" defaultValue={d.maxMessageLen} disabled={busy}
@@ -318,7 +338,7 @@ export default function AdminCoach() {
             : d.unprivileged?.dropped
               ? 'Jobs run as a separate unprivileged user that cannot read your data directory or secrets.'
               : d.unprivileged?.why?.includes('no child process')
-                ? 'Not needed for this provider — it makes an HTTPS request and starts no program on this server.'
+                ? 'Not needed for this provider. It makes an HTTPS request and starts no program on this server.'
                 : 'Jobs run with the server\'s own user on this host (no separate user to drop to).'}</div>
         </div>
       </details>
@@ -419,7 +439,7 @@ function CredentialPill({ auth }) {
   const s = auth?.state
   if (s === 'connected') return <span className="adm-pill ok">connected{auth.account ? ' · ' + auth.account : ''}</span>
   if (s === 'not-required') return <span className="adm-pill">not needed</span>
-  if (s === 'optional') return <span className="adm-pill">optional — none saved</span>
+  if (s === 'optional') return <span className="adm-pill">optional, none saved</span>
   if (s === 'unreadable') return <span className="adm-pill bad">can't be read</span>
   if (s === 'reconnect') return <span className="adm-pill bad">reconnect required</span>
   return <span className="adm-pill warn">needed</span>
@@ -558,7 +578,7 @@ function ApiKeySheet({ close, onDone, label, placeholder, optional }) {
   return <>
     <h3>{label} API key</h3>
     <div className="muted small" style={{ lineHeight: 1.5, marginBottom: 12 }}>
-      Stored encrypted on this server and sent to the provider only while a job runs. It is never shown again and never leaves the server{optional ? ' — and for an endpoint that takes no key, you can leave this empty and close the sheet.' : '.'}
+      Stored encrypted on this server and sent to the provider only while a job runs. It is never shown again and never leaves the server{optional ? '. For an endpoint that takes no key, you can leave this empty and close the sheet.' : '.'}
     </div>
     <TextField value={key} autoFocus type="password" placeholder={placeholder || 'sk-…'} autoCapitalize="none" autoCorrect="off" onChange={e => setKey(e.target.value)} />
     <div style={{ height: 12 }} />
