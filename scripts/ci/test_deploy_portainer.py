@@ -2,7 +2,8 @@
 import importlib.util
 import pathlib
 import unittest
-import urllib.parse
+import urllib.error
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location("deployment", pathlib.Path(__file__).with_name("deploy-portainer.py"))
 deployment = importlib.util.module_from_spec(spec)
@@ -12,7 +13,6 @@ spec.loader.exec_module(deployment)
 class DeploymentVerificationTest(unittest.TestCase):
     def setUp(self):
         self.config = deployment.configuration({
-            "PORTAINER_WEBHOOK_URL": "https://control.example.test/api/stacks/webhooks/example?other=value",
             "PORTAINER_URL": "https://control.example.test",
             "PORTAINER_API_KEY": "example-test-key",
             "PORTAINER_STACK_ID": "1",
@@ -61,11 +61,104 @@ class DeploymentVerificationTest(unittest.TestCase):
         self.unhealthy = True
         self.assertFalse(deployment.deployed(self.config, self.get))
 
-    def test_tag_replaces_existing_query_value(self):
-        self.config["PORTAINER_WEBHOOK_URL"] += "&OPENGYM_TAG=old"
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(deployment.webhook_url(self.config)).query)
-        self.assertEqual(query["OPENGYM_TAG"], [self.config["OPENGYM_TAG"]])
-        self.assertEqual(query["other"], ["value"])
+    def trigger_call(self, url, key=None, **kwargs):
+        self.assertEqual(key, "example-test-key")
+        if kwargs.get("method") == "PUT":
+            self.update_calls.append((url, kwargs))
+            return None
+        if url.endswith("/file"):
+            return {"StackFileContent": self.stack_file}
+        return self.stack
+
+    def prepare_stack(self):
+        self.stack_file = "services:\n  api:\n    image: example:${OPENGYM_TAG}\n"
+        self.stack = {"Type": 2, "EndpointId": 2, "GitConfig": None, "Env": [
+            {"name": "PRIVATE_SETTING", "value": "keep-this-value"},
+            {"name": "OPENGYM_TAG", "value": "old"}]}
+        self.update_calls = []
+
+    def test_trigger_preserves_live_file_and_private_environment(self):
+        self.prepare_stack()
+        deployment.trigger(self.config, self.trigger_call)
+        self.assertEqual(len(self.update_calls), 1)
+        url, kwargs = self.update_calls[0]
+        self.assertTrue(url.endswith("/stacks/1?endpointId=2"))
+        self.assertEqual(kwargs["payload"], {
+            "StackFileContent": self.stack_file,
+            "Env": [{"name": "PRIVATE_SETTING", "value": "keep-this-value"},
+                    {"name": "OPENGYM_TAG", "value": self.config["OPENGYM_TAG"]}],
+            "Prune": False, "PullImage": True})
+        self.assertEqual(self.stack["Env"][1]["value"], "old")
+        self.assertEqual(kwargs["timeout"], 120)
+
+    def test_trigger_adds_missing_tag_without_replacing_other_settings(self):
+        self.prepare_stack()
+        self.stack["Env"].pop()
+        deployment.trigger(self.config, self.trigger_call)
+        self.assertEqual(self.update_calls[0][1]["payload"]["Env"], [
+            {"name": "PRIVATE_SETTING", "value": "keep-this-value"},
+            {"name": "OPENGYM_TAG", "value": self.config["OPENGYM_TAG"]}])
+
+    def test_invalid_stack_configuration_never_updates(self):
+        cases = [{"Type": 1}, {"GitConfig": {"URL": "example"}},
+                 {"EndpointId": 0}, {"EndpointId": True},
+                 {"Env": None}, {"Env": [{"name": "PRIVATE_SETTING"}]}]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.prepare_stack()
+                self.stack.update(changes)
+                with self.assertRaises(deployment.DeploymentError):
+                    deployment.trigger(self.config, self.trigger_call)
+                self.assertEqual(self.update_calls, [])
+        self.prepare_stack()
+        self.stack_file = ""
+        with self.assertRaises(deployment.DeploymentError):
+            deployment.trigger(self.config, self.trigger_call)
+        self.assertEqual(self.update_calls, [])
+
+    def test_successful_write_does_not_require_json_response(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        with mock.patch.object(deployment.OPENER, "open", return_value=response) as opened:
+            deployment.request("https://control.example.test/api/stacks/1", "example-test-key",
+                               method="PUT", payload={"PullImage": True}, timeout=120)
+        req = opened.call_args.args[0]
+        self.assertEqual(req.get_method(), "PUT")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+        self.assertEqual(req.get_header("X-api-key"), "example-test-key")
+        response.read.assert_not_called()
+
+    def test_malformed_read_response_never_updates(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b"not-json"
+        with mock.patch.object(deployment.OPENER, "open", return_value=response) as opened:
+            with self.assertRaises(ValueError):
+                deployment.trigger(self.config)
+        self.assertEqual(opened.call_count, 1)
+        self.assertEqual(opened.call_args.args[0].get_method(), "GET")
+
+    def test_timeout_after_update_checks_deployment_without_retrying_trigger(self):
+        with mock.patch.dict(deployment.os.environ, self.config, clear=True), \
+                mock.patch.object(deployment, "trigger", side_effect=TimeoutError) as trigger, \
+                mock.patch.object(deployment, "deployed", return_value=True) as deployed, \
+                mock.patch("builtins.print"):
+            deployment.main()
+        trigger.assert_called_once()
+        deployed.assert_called_once()
+
+    def test_http_failure_reports_status_without_private_details(self):
+        error = urllib.error.HTTPError("https://private.example.test", 403,
+                                       "private response", {}, None)
+        with mock.patch.dict(deployment.os.environ, self.config, clear=True), \
+                mock.patch.object(deployment, "trigger", side_effect=error), \
+                mock.patch.object(deployment, "deployed") as deployed:
+            with self.assertRaises(deployment.DeploymentError) as result:
+                deployment.main()
+        self.assertIn("HTTP 403", str(result.exception))
+        self.assertNotIn("private.example", str(result.exception))
+        self.assertNotIn("private response", str(result.exception))
+        deployed.assert_not_called()
 
     def test_unsafe_url_rejected_without_disclosing_it(self):
         self.config["PORTAINER_URL"] = "http://private-host.example.test"
