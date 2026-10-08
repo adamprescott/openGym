@@ -77,26 +77,27 @@ secret values directly into a Compose definition committed to Git.
 
 ## 3. Enable automated deployment
 
-After the first deployment works, enable the stack's webhook in Portainer.
-Create a GitHub environment named **production**. Put these secrets in that
-environment (repository-level Actions secrets also work):
+After the first deployment works, create a GitHub environment named **production**.
+Put these secrets in that environment (repository-level Actions secrets also work):
 
 | Secret | Value |
 | --- | --- |
-| `PORTAINER_WEBHOOK_URL` | Complete generated stack webhook URL. |
 | `PORTAINER_URL` | HTTPS base URL for Portainer, without `/api`. |
-| `PORTAINER_API_KEY` | Access token able to read this stack and its Docker endpoint's containers/images. |
+| `PORTAINER_API_KEY` | Access token able to read and update this stack and read its Docker endpoint's containers/images. |
 | `PORTAINER_STACK_ID` | Numeric stack ID, visible in its Portainer page URL/API. |
 | `OPENGYM_HEALTH_URL` | Complete application HTTPS URL ending in `/api/health`. |
 
-The API token is used only for verification. The webhook authorizes the stack
-update itself. Both Portainer and the health endpoint need to be reachable by
+The API token authorizes both the stack update and verification. Use a file-based
+Docker Compose stack created through Portainer's editor or file upload. Both
+Portainer and the health endpoint need to be reachable by
 GitHub-hosted runners, have valid HTTPS certificates, and respond without login
 redirects. Avoid printing secret values or API responses while diagnosing CI.
 
 Set the repository variable `PORTAINER_DEPLOY_ENABLED=true`. Subsequent pushes to
-`main` test, publish both images, and POST the webhook with `OPENGYM_TAG` as a
-query variable. The workflow serializes the complete pipeline and skips deployment
+`main` test, publish both images, and update the stack through the authenticated
+Portainer API. The workflow reads the current stack file and environment, replaces
+only `OPENGYM_TAG`, then requests an image pull without pruning resources. The
+workflow serializes the complete pipeline and skips deployment
 when its commit is no longer the latest `main`. GitHub may replace an older
 pending concurrency run with a newer one; deploying every intermediate commit
 is not guaranteed. Manual runs from branches other than `main` cannot publish
@@ -108,7 +109,9 @@ Only then does it check the application health endpoint. It allows 15 minutes
 for the initial media download, pulls, and Docker health checks. Requests and
 responses are not printed, and failures report generic messages to keep host
 configuration out of public Actions logs. Inspect Portainer privately for the
-specific reason when a deployment fails.
+specific reason when a deployment fails. A connection timeout during an update
+does not retry the update; verification checks whether the requested images
+were deployed despite the interrupted response.
 
 For completely automatic deployment, leave the production environment without
 required reviewers. Add reviewers if you want an approval before each update.
@@ -131,8 +134,8 @@ Portainer and update the stack. Retain the same image names, configuration, and
 volumes. A data-format change can require restoring the corresponding backup;
 rollback is deliberately not automatic.
 
-The webhook updates image tags, not this repository's stack file. When the
-Compose template changes, apply its changes separately through Portainer's
+Automated deployment preserves the live stack file while updating its image tag.
+When the Compose template changes, apply its changes separately through Portainer's
 editor while retaining private settings. The inherited GitLab mirror remains
 upstream-only, and the GitHub Pages demo is also upstream-only. Android release
 publishing is separate from server deployment; see [Android fork builds](ANDROID_FORK.md).

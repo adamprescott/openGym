@@ -27,12 +27,20 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 OPENER = urllib.request.build_opener(NoRedirect)
 
 
-def request(url, key=None, method="GET"):
+def request(url, key=None, method="GET", payload=None, timeout=15):
     headers = {"Accept": "application/json"}
     if key:
         headers["X-API-Key"] = key
-    req = urllib.request.Request(url, headers=headers, method=method)
-    with OPENER.open(req, timeout=15) as response:
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, headers=headers, method=method, data=data)
+    with OPENER.open(req, timeout=timeout) as response:
+        # A successful write needs no response body. Some proxies return plain
+        # text instead of JSON; that must not turn an accepted update into failure.
+        if method != "GET":
+            return None
         body = response.read(2_000_000)
         return json.loads(body) if body else None
 
@@ -45,13 +53,13 @@ def require_https(value):
 
 
 def configuration(env):
-    names = ("PORTAINER_WEBHOOK_URL", "PORTAINER_URL", "PORTAINER_API_KEY",
+    names = ("PORTAINER_URL", "PORTAINER_API_KEY",
              "PORTAINER_STACK_ID", "OPENGYM_HEALTH_URL", "OPENGYM_TAG",
              "OPENGYM_API_IMAGE", "OPENGYM_WEB_IMAGE", "OPENGYM_API_DIGEST", "OPENGYM_WEB_DIGEST")
     if any(not env.get(name) for name in names):
         raise DeploymentError("Required deployment configuration is missing; see the deployment guide.")
     config = {name: env[name] for name in names}
-    for name in ("PORTAINER_WEBHOOK_URL", "PORTAINER_URL", "OPENGYM_HEALTH_URL"):
+    for name in ("PORTAINER_URL", "OPENGYM_HEALTH_URL"):
         require_https(config[name])
     if urllib.parse.urlsplit(config["PORTAINER_URL"]).query:
         raise DeploymentError("Portainer base URL cannot contain a query string.")
@@ -65,12 +73,36 @@ def configuration(env):
     return config
 
 
-def webhook_url(config):
-    parsed = urllib.parse.urlsplit(config["PORTAINER_WEBHOOK_URL"])
-    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    pairs = [(name, value) for name, value in pairs if name != "OPENGYM_TAG"]
-    pairs.append(("OPENGYM_TAG", config["OPENGYM_TAG"]))
-    return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(pairs)))
+def trigger(config, call=request):
+    base = config["PORTAINER_URL"].rstrip("/") + "/api"
+    key = config["PORTAINER_API_KEY"]
+    stack_url = base + "/stacks/" + config["PORTAINER_STACK_ID"]
+    stack = call(stack_url, key)
+    if not isinstance(stack, dict) or stack.get("Type") != 2 or stack.get("GitConfig"):
+        raise DeploymentError("Deployment requires a file-based Docker Compose stack.")
+    endpoint = stack.get("EndpointId")
+    if not isinstance(endpoint, int) or isinstance(endpoint, bool) or endpoint <= 0:
+        raise DeploymentError("The deployment stack has no valid Docker endpoint.")
+    env = stack.get("Env")
+    if not isinstance(env, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("value"), str) for item in env):
+        raise DeploymentError("The deployment stack environment could not be read safely.")
+    file = call(stack_url + "/file", key)
+    if not isinstance(file, dict) or not isinstance(file.get("StackFileContent"), str) or not file["StackFileContent"].strip():
+        raise DeploymentError("The deployment stack file could not be read safely.")
+    # Preserve the deployed definition and all private settings; only the image
+    # tag changes. Never substitute the repository template for this live file.
+    updated_env = [dict(item) for item in env]
+    for item in updated_env:
+        if item["name"] == "OPENGYM_TAG":
+            item["value"] = config["OPENGYM_TAG"]
+    if not any(item["name"] == "OPENGYM_TAG" for item in updated_env):
+        updated_env.append({"name": "OPENGYM_TAG", "value": config["OPENGYM_TAG"]})
+    call(stack_url + "?" + urllib.parse.urlencode({"endpointId": endpoint}), key,
+         method="PUT", timeout=120, payload={
+             "StackFileContent": file["StackFileContent"], "Env": updated_env,
+             "Prune": False, "PullImage": True})
 
 
 def deployed(config, get=request):
@@ -109,10 +141,17 @@ def deployed(config, get=request):
 def main():
     config = configuration(os.environ)
     try:
-        request(webhook_url(config), method="POST")
-    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-        raise DeploymentError("Portainer did not confirm the deployment trigger; inspect its stack privately.") from None
-    print("Deployment accepted. Waiting for both published image digests and application health.", flush=True)
+        trigger(config)
+    except urllib.error.HTTPError as exc:
+        raise DeploymentError("Portainer deployment API returned HTTP " + str(exc.code) +
+                              "; inspect its stack privately.") from None
+    except (TimeoutError, urllib.error.URLError, OSError):
+        # An update may still finish after a connection times out. Verification
+        # below resolves that ambiguity without issuing a second deployment.
+        print("Deployment API connection was interrupted. Checking the published images before reporting failure.", flush=True)
+    except (ValueError, KeyError, TypeError):
+        raise DeploymentError("Portainer deployment configuration could not be read; inspect its stack privately.") from None
+    print("Waiting for both published image digests and application health.", flush=True)
     deadline = time.monotonic() + 900
     while time.monotonic() < deadline:
         try:
