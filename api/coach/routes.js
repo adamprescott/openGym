@@ -10,7 +10,7 @@ import { computeCohort } from './cohort.js';
 import { adapterFor } from './adapters/index.js';
 import { canDropPrivileges } from './adapters/spawn.js';
 import { DATA_CATEGORIES } from './core/payload.js';
-import { validateBaseUrl, baseUrlFor } from './core/providers.js';
+import { validateBaseUrl, validateHeaders, baseUrlFor } from './core/providers.js';
 import * as codexAuth from './codex-auth.js';
 
 // Job failures the user sees, in the app's own voice. The raw provider detail never reaches
@@ -168,9 +168,14 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin, listUse
         model: cfgStore.modelFor(cfg),
         models: cfg.models,
         baseUrl: cfgStore.providerMeta(cfg).http ? baseUrlFor(cfg.provider, cfg) : null,
+        // Extra static headers this endpoint is called with (compatible endpoints only).
+        // Values, not just names: the admin wrote them and needs to see them to edit them.
+        // Plaintext next to baseUrl — routing aids, not credentials (the key stays encrypted).
+        headers: cfgStore.providerMeta(cfg).http ? (cfgStore.optionsFor(cfg).headers || null) : null,
         knownModels: check.models || null,
         caps: cfg.caps,
         maxMessageLen: cfg.maxMessageLen,
+        maxOutputTokens: cfg.maxOutputTokens,
         community: !!cfg.community,
         runtime: { ok: !!check.ok, version: check.version || null, error: check.error || null, needsKey: !!check.needsKey },
         credentialAccess: { ...cfgStore.accessFor(cfg), revision: cfgStore.accessRevision(readSession(req)?.id, cfg) },
@@ -236,6 +241,15 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin, listUse
         if (!v.value && !cfgStore.PROVIDERS[target].defaultBase) return json(res, 400, { error: `${target} has no default endpoint, enter one` });
         patch.providerOptions = { ...current.providerOptions, [target]: { ...(current.providerOptions[target] || {}), baseUrl: v.value } };
       }
+      if (body.headers !== undefined) {
+        if (!cfgStore.PROVIDERS[target].baseUrl) return json(res, 400, { error: `${target} has a fixed endpoint` });
+        const h = validateHeaders(body.headers);
+        if (!h.ok) return json(res, 400, { error: h.error });
+        // Build on the patch, not on current: a body carrying baseUrl AND headers must keep both.
+        const next = { ...((patch.providerOptions && patch.providerOptions[target]) || current.providerOptions[target] || {}) };
+        if (h.value) next.headers = h.value; else delete next.headers;
+        patch.providerOptions = { ...current.providerOptions, ...(patch.providerOptions || {}), [target]: next };
+      }
       if (body.community !== undefined) patch.community = !!body.community;
       if (body.caps) {
         patch.caps = {
@@ -247,6 +261,12 @@ export function coachRoutes({ json, readBody, readSession, requireAdmin, listUse
         patch.maxMessageLen = Math.max(
           cfgStore.MAX_MESSAGE_LEN_FLOOR,
           Math.min(cfgStore.MAX_MESSAGE_LEN_CEILING, +body.maxMessageLen || current.maxMessageLen)
+        );
+      }
+      if (body.maxOutputTokens !== undefined) {
+        patch.maxOutputTokens = Math.max(
+          cfgStore.MAX_OUTPUT_TOKENS_FLOOR,
+          Math.min(cfgStore.MAX_OUTPUT_TOKENS_CEILING, +body.maxOutputTokens || current.maxOutputTokens)
         );
       }
       cfgStore.save(patch);
