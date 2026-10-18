@@ -19,7 +19,7 @@ jobs:
 
   build:
     needs: tests
-    if: github.repository == 'adamprescott/openGym' && github.ref == 'refs/heads/feature/codex-subscription'
+    if: github.repository == 'adamprescott/openGym' && (github.ref == 'refs/heads/feature/codex-subscription' || github.ref == 'refs/heads/sync/upstream-pr7')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
