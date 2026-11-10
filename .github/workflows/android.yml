@@ -72,7 +72,9 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Install Android SDK components
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+        run: |
+          # Hosted runners expose ANDROID_HOME, but do not always put the CLI on PATH.
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
       - run: npm ci
         working-directory: frontend
       - run: npm test
