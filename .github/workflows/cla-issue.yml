@@ -16,7 +16,8 @@ concurrency:
 
 jobs:
   record:
-    if: github.event.issue.number == 554 && !github.event.issue.pull_request
+    # Issue #554 and the signature branch are specific to the upstream repository.
+    if: github.repository == 'DuarteSantos8/openGym' && github.event.issue.number == 554 && !github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
