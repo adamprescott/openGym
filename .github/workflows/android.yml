@@ -47,6 +47,21 @@ jobs:
           fi
           echo "ANDROID_APPLICATION_ID=$APPLICATION_ID" >> "$GITHUB_ENV"
           echo "ANDROID_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+      - name: Check signing secrets before building
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in ANDROID_KEYSTORE_B64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Add $name to the android-release environment secrets."
+              missing=1
+            fi
+          done
+          exit "$missing"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -65,9 +80,8 @@ jobs:
       - name: Build mobile frontend
         working-directory: frontend
         env:
-          VITE_DISABLE_UPDATES: '1'
           APP_BUILD: ${{ github.sha }}
-        run: npm run build:mobile
+        run: npm run build:mobile:fork
       - name: Build unsigned APK
         working-directory: frontend/android
         run: ./gradlew --no-daemon assembleSideloadRelease
