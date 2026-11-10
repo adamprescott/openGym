@@ -38,6 +38,17 @@ async function settle(uid, ms = 15000) {
 }
 const lastOutcome = uid => jobs.readUser(uid).history.at(-1);
 
+test('a chat question completes through the real fixture runtime with an answer and no plan changes', async () => {
+  const uid = 'u-fixture-ask';
+  writeState(DIR, uid, sampleState());
+  jobs.enqueue(uid, { kind: 'ask', note: 'How should I approach my next workout?' });
+  const status = await settle(uid);
+  assert.equal(status.pending?.kind, 'ask');
+  assert.equal(status.pending.answer, 'Your question reached the Coach. This fixture provider does not generate training advice.');
+  assert.equal(status.pending.changes, undefined);
+  assert.equal(lastOutcome(uid).outcome, 'ready');
+});
+
 
 
 test('no consent, no job — the gate is on the server, not the screen', () => {
