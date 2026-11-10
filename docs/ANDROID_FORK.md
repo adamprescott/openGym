@@ -40,7 +40,8 @@ GitHub release whose commit is included in `main`. Its signed APK and checksum a
 to that release. Keep `frontend/package.json` and Android `versionName` aligned with your
 release version. Re-running an upload will not overwrite existing release assets.
 
-The workflow disables the upstream GitLab update check with `VITE_DISABLE_UPDATES=1`.
+`npm run build:mobile:fork` builds the mobile frontend and disables upstream update checks
+with `VITE_DISABLE_UPDATES=1`; the signed APK workflow uses this command.
 Install future APKs from this fork's artifacts/releases manually; an upstream APK cannot
 update an app signed with your key. Local builds need the same flag and the
 `ANDROID_APPLICATION_ID` / `ANDROID_VERSION_CODE` environment overrides if they are meant
@@ -50,3 +51,34 @@ is preserved. Protect and retain your key: losing it prevents normal updates to 
 The workflow uses Node 22, Java 21, Android SDK 35, and the repository's Gradle wrapper.
 It runs frontend tests before the mobile build. Native runtime behavior still needs a real
 device check: pairing, sync, notifications, and installing the next signed version.
+
+## Ubuntu / WSL signing setup
+
+Check `command -v keytool`. If missing, install Java with
+`sudo apt update && sudo apt install openjdk-21-jdk-headless`.
+For a new fork installation, create a separate signing key (reuse the existing key and
+application ID if this fork is already installed):
+
+```bash
+keytool -genkeypair -v -keystore opengym-release.jks -alias opengym \
+  -keyalg RSA -keysize 2048 -validity 10000
+base64 -w 0 opengym-release.jks | clip.exe
+```
+
+Paste the clipboard into `ANDROID_KEYSTORE_B64` in the `android-release` environment.
+Set `ANDROID_KEYSTORE_PASSWORD` and `ANDROID_KEY_ALIAS` (`opengym`). Set
+`ANDROID_KEY_PASSWORD` if the key password differs; otherwise the workflow uses the
+keystore password. Back up the keystore and passwords in your password manager, outside
+the repository. Never commit the keystore or its Base64 representation.
+
+For this fork, use repository variable
+`ANDROID_APPLICATION_ID=io.github.adamprescott.opengym`. Once the signing secrets are
+present, enable **Build signed Android APK** if disabled and run it on `main` with
+version code `1` for the first installation, increasing it for every subsequent update.
+Missing signing secrets are reported before dependencies, tests or builds run.
+
+The mobile build includes this fork's ChatGPT Coach interface. Pair with your existing
+server account using **Settings → Account → Pair the mobile app** in the browser, then
+**Connect to my server** in the app. A paired administrator can access **Settings →
+Account → Admin dashboard → AI Coach**. Signing and installation still require a real
+phone check; compiling the app does not validate Health Connect or native notifications.
