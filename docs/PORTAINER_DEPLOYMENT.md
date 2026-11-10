@@ -64,10 +64,10 @@ the proxy network, and keeps the API on the application network. It publishes no
 host ports. DNS and Traefik's Docker provider/TLS resolver must already work.
 Choose the permanent hostname before registering passkeys.
 
-The media initializer downloads the upstream exercise assets into named volumes
-and must finish before nginx starts. Its success markers are written only after
-both copies succeed, allowing a failed download to retry. Read `NOTICE.md` for
-the media's separate licensing terms.
+Exercise assets are bundled in the web image. No media initializer or separate exercise
+volumes are required. Existing exercise volumes can be left in place when updating a
+stack; application data and Coach credentials retain their persistent volumes. See
+`NOTICE.md` for the media's separate licensing terms.
 
 Optional Portainer variables include `ADMIN_UIDS`, `INVITE_ONLY`, `ALLOW_GUEST`,
 `DEFAULT_LANG`, `PASSWORD_LOGIN`, `RP_NAME`, `COACH_DISABLED`, and
@@ -106,7 +106,7 @@ or deploy. Pull requests run tests without deployment credentials.
 Verification polls Portainer for the requested stack environment tag, both
 running service containers, their health, and their exact GHCR image digests.
 Only then does it check the application health endpoint. It allows 15 minutes
-for the initial media download, pulls, and Docker health checks. Requests and
+for image pulls and Docker health checks. Requests and
 responses are not printed, and failures report generic messages to keep host
 configuration out of public Actions logs. Inspect Portainer privately for the
 specific reason when a deployment fails. A connection timeout during an update

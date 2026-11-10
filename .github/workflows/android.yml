@@ -70,7 +70,7 @@ jobs:
         run: npm run build:mobile
       - name: Build unsigned APK
         working-directory: frontend/android
-        run: ./gradlew --no-daemon assembleRelease
+        run: ./gradlew --no-daemon assembleSideloadRelease
       - name: Sign and verify APK
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -89,7 +89,7 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$keystore"
           mkdir -p apk
           bt="$ANDROID_HOME/build-tools/35.0.0"
-          "$bt/zipalign" -f -p 4 frontend/android/app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
+          "$bt/zipalign" -f -p 4 frontend/android/app/build/outputs/apk/sideload/release/app-sideload-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
           apk="apk/openGym-${ANDROID_VERSION_CODE}.apk"
           "$bt/apksigner" sign --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD --out "$apk" "$RUNNER_TEMP/aligned.apk"
           "$bt/apksigner" verify "$apk"

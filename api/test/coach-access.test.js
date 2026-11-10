@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { tempData } from './helpers.mjs';
-tempData();
+import { tempData, writeState, sampleState } from './helpers.mjs';
+const dataDir = tempData();
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'coach-access-auth-'));
 process.env.COACH_CREDENTIAL_DIR = home;
 const config = await import('../coach/config.js');
@@ -105,4 +105,54 @@ test('a connection change while reading the request cannot use the previous owne
   assert.equal(res.status, 403);
   assert.equal(config.credentialFor('member').ok, false);
   assert.equal(config.accessRevision('owner', snapshot), oldRevision, 'snapshot revision stays consistent with its policy');
+});
+
+test('ask and adapt spend subscription access only for its owner and granted profiles', async () => {
+  fresh();
+  forcePrivilegeVerdict({ ok: true, dropped: false, why: 'synthetic runtime for access checks' });
+  auth.setAuthRunnerForTests(async () => ({ code: 0, stdout: 'Logged in using ChatGPT', stderr: '' }));
+  config.setCredentialAccess('codex', ['member']);
+  const { adapterFor } = await import('../coach/adapters/index.js');
+  const jobs = await import('../coach/jobs.js');
+  const adapter = adapterFor('codex');
+  const originalInvoke = adapter.invoke;
+  let invocations = 0;
+  // The real enqueue, credential checks and invocation wrapper run; no provider is contacted.
+  adapter.invoke = async () => { invocations++; return { code: 1, text: '', stderr: 'synthetic response' }; };
+  const routes = coachRoutes({
+    json: (res, status, body) => Object.assign(res, { status, body }),
+    readSession: req => ({ id: req.uid }), readBody: async req => req.body,
+    requireAdmin: () => false
+  });
+  const today = { name: 'Full body A', entries: [{
+    id: '0001', target: { sets: 3, reps: 10, weight: 20 },
+    sets: [{ w: 20, r: 10, done: false }]
+  }] };
+  try {
+    for (const uid of ['owner', 'member', 'stranger']) {
+      writeState(dataDir, uid, sampleState());
+      for (const kind of ['ask', 'adapt']) {
+        const before = invocations;
+        const res = {};
+        await routes[`POST /api/coach/${kind}`]({ uid, body: {
+          text: 'How should I adjust the next set?', today, entry: 0
+        } }, res);
+        if (uid === 'stranger') {
+          assert.equal(res.status, 409);
+          assert.equal(res.body.code, 'shared');
+          assert.equal(jobs.status(uid).job, null);
+          assert.equal(invocations, before, 'a refused request cannot reach the runtime');
+        } else {
+          assert.equal(res.status, 202, `${uid} may enqueue ${kind}`);
+          const deadline = Date.now() + 5000;
+          while (jobs.status(uid).job && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+          assert.equal(jobs.status(uid).job, null, 'the synthetic request completed');
+          assert.equal(invocations, before + 1, `${uid}'s ${kind} passed the invocation access check`);
+        }
+      }
+    }
+    assert.equal(invocations, 4);
+  } finally {
+    adapter.invoke = originalInvoke;
+  }
 });
